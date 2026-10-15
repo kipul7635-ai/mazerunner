@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Path Runner</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #05060a; overflow: hidden;
+    font-family: 'Lucida Console', 'Monaco', 'Consolas', 'Andale Mono', 'Courier New', monospace;
+    font-weight: bold;
+    -webkit-user-select: none; user-select: none;
+    touch-action: none;
+    font-variant-ligatures: none;
+    transition: background .5s;
+  }
+  canvas { display: block; }
+  #hud {
+    position: fixed; top: 14px; left: 16px;
+    font-size: 11px; letter-spacing: 4px;
+    pointer-events: none;
+    text-transform: uppercase;
+    transition: color .5s;
+  }
+  #hud b { font-weight: bold; letter-spacing: 5px; }
+  #timer {
+    position: fixed; top: 14px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 14px; letter-spacing: 6px;
+    pointer-events: none;
+    text-transform: uppercase;
+    font-variant-numeric: tabular-nums;
+    transition: color .5s;
+  }
+  #msg {
+    position: fixed; left: 0; right: 0; top: 45%;
+    text-align: center;
+    font-size: 22px; letter-spacing: 14px;
+    pointer-events: none; opacity: 0;
+    transition: opacity .1s, color .5s;
+    text-transform: uppercase;
+  }
+  #msg.on { opacity: 1; }
+  #hint {
+    position: fixed; bottom: 14px; left: 0; right: 0;
+    text-align: center;
+    font-size: 10px; letter-spacing: 5px;
+    pointer-events: none; opacity: .5;
+    text-transform: uppercase;
+    transition: color .5s, opacity .5s;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="timer">00:000</div>
+<div id="msg"></div>
+<div id="hint">◀ tap left &nbsp;·&nbsp; tap right ▶</div>
+<script>
+(function(){
+'use strict';
+
+const cv      = document.getElementById('c');
+const ctx     = cv.getContext('2d');
+const hudEl   = document.getElementById('hud');
+const timerEl = document.getElementById('timer');
+const msgEl   = document.getElementById('msg');
+const hintEl  = document.getElementById('hint');
+
+let CW = 0, CH = 0;
+
+/* ============================================================= */
+/*  THEME                                                        */
+/* ============================================================= */
+let hue = 200;
+let accent     = 'hsl(200,95%,62%)';
+let accentSoft = 'hsla(200,95%,62%,0.55)';
+let wallColor  = 'hsl(20,95%,62%)';
+let wallGlow   = 'hsla(20,95%,62%,0.13)';
+let wallBright = 'hsl(20,100%,78%)';
+let bgBase     = 'hsl(200,40%,4%)';
+
+function applyTheme(){
+  const comp = (hue + 180) % 360;
+
+  accent     = 'hsl(' + hue + ',95%,62%)';
+  accentSoft = 'hsla(' + hue + ',95%,62%,0.55)';
+  wallColor  = 'hsl(' + comp + ',95%,62%)';
+  wallGlow   = 'hsla(' + comp + ',95%,62%,0.13)';
+  wallBright = 'hsl(' + comp + ',100%,78%)';
+  bgBase     = 'hsl(' + hue + ',40%,4%)';
+
+  document.body.style.background = bgBase;
+  hudEl.style.color   = 'hsla(' + hue + ',60%,38%,1)';
+  timerEl.style.color = accent;
+  msgEl.style.color   = accent;
+  hintEl.style.color  = accentSoft;
+  const b = hudEl.querySelector('b');
+  if(b) b.style.color = accent;
+}
+
+function pickColors(){
+  hue = Math.floor(Math.random() * 360);
+  applyTheme();
+}
+
+/* ============================================================= */
+/*  RESIZE                                                       */
+/* ============================================================= */
+function resize(){
+  CW = cv.width  = window.innerWidth;
+  CH = cv.height = window.innerHeight;
+}
+addEventListener('resize', resize);
+
+/* ============================================================= */
+/*  STATE                                                        */
+/* ============================================================= */
+const G = {
+  level: 1,
+  state: 'play',
+  timer: 0,
+  delay: 0,
+  levelTime: 0,
+  white: 0,
+  shake: 0,
+  maxSpeed: 210
+};
+
+let segs     = [];   // flat straight wall segments  x1,y1,x2,y2
+let buckets  = new Map();
+const BUCKET = 128;
+const BPAD   = 44;
+
+let W = 0, H = 0;
+let s = 200;
+
+let path       = [];          // array of [x,y] grid cells forming the corridor
+let pathIdxMap = new Map();   // key (y*W + x) -> index into path
+
+const player = { x:0, y:0, r:3.4, ang:0, vx:0, vy:0 };
+let angVel = 0;
+
+let trail = [];
+
+let goalCell  = { x:0, y:0 };
+let goalX = 0, goalY = 0;
+let startCell = { x:0, y:0 };
+let runwayDir = { x:0, y:1 };
+
+/* navigator (tweened angle) */
+let navAngle       = 0;
+let navAngleTarget = 0;
+let navCell        = { x:-1, y:-1 };
+
+/* camera lookahead */
+let lookX = 0, lookY = 0;
+
+const cam = { x:0, y:0 };
+
+let steerTarget = 0;
+
+/* ============================================================= */
+/*  INPUT                                                        */
+/* ============================================================= */
+const keys = new Set();
+const pointers = new Map();
+
+const KEYMAP = {
+  ArrowLeft:'left', ArrowRight:'right',
+  a:'left', d:'right', A:'left', D:'right'
+};
+
+function computeSteerTarget(){
+  let t = 0;
+  if(keys.has('left'))  t -= 1;
+  if(keys.has('right')) t += 1;
+  pointers.forEach(function(side){ t += side; });
+  steerTarget = t < -1 ? -1 : (t > 1 ? 1 : t);
+}
+
+addEventListener('keydown', function(e){
+  const k = KEYMAP[e.key];
+  if(!k) return;
+  e.preventDefault();
+  keys.add(k);
+  computeSteerTarget();
+});
+addEventListener('keyup', function(e){
+  const k = KEYMAP[e.key];
+  if(!k) return;
+  e.preventDefault();
+  keys.delete(k);
+  computeSteerTarget();
+});
+
+cv.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+
+cv.addEventListener('pointerdown', function(e){
+  e.preventDefault();
+  const side = e.clientX < CW * 0.5 ? -1 : 1;
+  pointers.set(e.pointerId, side);
+  computeSteerTarget();
+  try { cv.setPointerCapture(e.pointerId); } catch(_){}
+});
+
+cv.addEventListener('pointermove', function(e){
+  if(!pointers.has(e.pointerId)) return;
+  e.preventDefault();
+  const side = e.clientX < CW * 0.5 ? -1 : 1;
+  if(pointers.get(e.pointerId) !== side){
+    pointers.set(e.pointerId, side);
+    computeSteerTarget();
+  }
+});
+
+function endPointer(e){
+  if(!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  computeSteerTarget();
+}
+cv.addEventListener('pointerup',     endPointer);
+cv.addEventListener('pointercancel', endPointer);
+cv.addEventListener('pointerleave',  endPointer);
+
+/* ============================================================= */
+/*  CORRIDOR PATH GENERATION                                     */
+/*  Non-touching self-avoiding random walk:                       */
+/*  new cell must have no visited cardinal neighbours             */
+/*  (other than the cell we came from), so the corridor never     */
+/*  merges with itself.                                           */
+/* ============================================================= */
+function attemptWalk(targetLen, N){
+  const visited = new Set();
+  const out = [];
+
+  const edge = Math.floor(Math.random() * 4);
+  let sx, sy;
+  if(edge === 0){ sx = Math.floor(Math.random() * N); sy = 0; }
+  else if(edge === 1){ sx = N - 1; sy = Math.floor(Math.random() * N); }
+  else if(edge === 2){ sx = Math.floor(Math.random() * N); sy = N - 1; }
+  else { sx = 0; sy = Math.floor(Math.random() * N); }
+
+  visited.add(sy * N + sx);
+  out.push([sx, sy]);
+
+  const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+
+  while(out.length < targetLen){
+    const last = out[out.length - 1];
+    const cx = last[0], cy = last[1];
+    const opts = [];
+
+    for(let d = 0; d < 4; d++){
+      const nx = cx + dirs[d][0];
+      const ny = cy + dirs[d][1];
+      if(nx < 0 || nx >= N || ny < 0 || ny >= N) continue;
+      if(visited.has(ny * N + nx)) continue;
+
+      // check the 4-neighbours of the candidate (excluding the one we came from)
+      let ok = true;
+      for(let e = 0; e < 4; e++){
+        const ax = nx + dirs[e][0];
+        const ay = ny + dirs[e][1];
+        if(ax === cx && ay === cy) continue;
+        if(ax < 0 || ax >= N || ay < 0 || ay >= N) continue;
+        if(visited.has(ay * N + ax)){ ok = false; break; }
+      }
+      if(ok) opts.push([nx, ny]);
+    }
+
+    if(opts.length === 0) break;
+
+    const pick = opts[(Math.random() * opts.length) | 0];
+    visited.add(pick[1] * N + pick[0]);
+    out.push(pick);
+  }
+
+  return out;
+}
+
+function generateCorridor(targetLen, N, attempts){
+  let best = null;
+  for(let i = 0; i < attempts; i++){
+    const p = attemptWalk(targetLen, N);
+    if(!best || p.length > best.length) best = p;
+    if(best.length >= targetLen) break;
+  }
+  return best || [[0,0],[0,1],[0,2],[0,3]];
+}
+
+/* ============================================================= */
+/*  BUILD LEVEL                                                  */
+/* ============================================================= */
+function buildLevel(){
+  pickColors();
+
+  const level = G.level;
+
+  const targetLen = 12 + (level - 1) * 5;
+  const N = Math.ceil(Math.sqrt(targetLen) * 2.2) + 4;
+
+  W = N; H = N;
+  s = 200;
+  G.maxSpeed = Math.round((132 + level * 7) * 1.5);
+
+  path = generateCorridor(targetLen, N, 200);
+  if(path.length < 4){
+    path = [[0,0],[1,0],[2,0],[3,0],[4,0]];
+  }
+
+  pathIdxMap = new Map();
+  for(let i = 0; i < path.length; i++){
+    pathIdxMap.set(path[i][1] * N + path[i][0], i);
+  }
+
+  startCell = { x: path[0][0], y: path[0][1] };
+  goalCell  = { x: path[path.length-1][0], y: path[path.length-1][1] };
+  runwayDir = {
+    x: path[1][0] - path[0][0],
+    y: path[1][1] - path[0][1]
+  };
+
+  goalX = (goalCell.x + 0.5) * s;
+  goalY = (goalCell.y + 0.5) * s;
+
+  /* ---- walls: all 4 sides of every path cell, minus the openings ---- */
+  segs = [];
+  for(let i = 0; i < path.length; i++){
+    const cx = path[i][0], cy = path[i][1];
+    const prev = i > 0              ? path[i-1] : null;
+    const next = i < path.length-1  ? path[i+1] : null;
+
+    const X = cx * s, Y = cy * s;
+
+    const openN = (prev && prev[0] === cx     && prev[1] === cy - 1) ||
+                  (next && next[0] === cx     && next[1] === cy - 1);
+    const openS = (prev && prev[0] === cx     && prev[1] === cy + 1) ||
+                  (next && next[0] === cx     && next[1] === cy + 1);
+    const openW = (prev && prev[0] === cx - 1 && prev[1] === cy    ) ||
+                  (next && next[0] === cx - 1 && next[1] === cy    );
+    const openE = (prev && prev[0] === cx + 1 && prev[1] === cy    ) ||
+                  (next && next[0] === cx + 1 && next[1] === cy    );
+
+    if(!openN) segs.push(X,     Y,     X + s, Y    );
+    if(!openS) segs.push(X,     Y + s, X + s, Y + s);
+    if(!openW) segs.push(X,     Y,     X,     Y + s);
+    if(!openE) segs.push(X + s, Y,     X + s, Y + s);
+  }
+
+  buildBuckets();
+
+  /* ---- player ---- */
+  player.x = (startCell.x + 0.5) * s;
+  player.y = (startCell.y + 0.5) * s;
+  player.ang = Math.atan2(runwayDir.y, runwayDir.x);
+  player.vx = Math.cos(player.ang) * G.maxSpeed;
+  player.vy = Math.sin(player.ang) * G.maxSpeed;
+  angVel = 0;
+
+  trail = [{ x: player.x, y: player.y }];
+  lookX = player.x;
+  lookY = player.y;
+
+  cam.x = player.x - CW / 2;
+  cam.y = player.y - CH / 2;
+
+  /* ---- navigator ---- */
+  navCell.x = -1; navCell.y = -1;
+  navAngle = Math.atan2(runwayDir.y, runwayDir.x);
+  navAngleTarget = navAngle;
+
+  steerTarget = 0;
+  keys.clear(); pointers.clear();
+
+  G.levelTime = 0;
+  G.delay     = 0.40;
+  G.state     = 'play';
+  G.timer     = 0;
+  G.white     = 0;
+  G.shake     = 0;
+
+  computeSteerTarget();
+}
+
+/* ------------------------------------------------------------- */
+/*  spatial buckets for walls                                    */
+/* ------------------------------------------------------------- */
+function bucketKey(cx, cy){
+  return (cx + 4096) * 8192 + (cy + 4096);
+}
+
+function buildBuckets(){
+  buckets = new Map();
+  for(let i = 0; i < segs.length; i += 4){
+    const x1 = segs[i],   y1 = segs[i+1];
+    const x2 = segs[i+2], y2 = segs[i+3];
+
+    const minx = Math.min(x1, x2) - BPAD, maxx = Math.max(x1, x2) + BPAD;
+    const miny = Math.min(y1, y2) - BPAD, maxy = Math.max(y1, y2) + BPAD;
+
+    const c0 = Math.floor(minx / BUCKET), c1 = Math.floor(maxx / BUCKET);
+    const r0 = Math.floor(miny / BUCKET), r1 = Math.floor(maxy / BUCKET);
+
+    for(let cx = c0; cx <= c1; cx++){
+      for(let cy = r0; cy <= r1; cy++){
+        const k = bucketKey(cx, cy);
+        let arr = buckets.get(k);
+        if(!arr){ arr = []; buckets.set(k, arr); }
+        arr.push(i);
+      }
+    }
+  }
+}
+
+const EMPTY = [];
+function bucketAt(x, y){
+  const arr = buckets.get(bucketKey(Math.floor(x / BUCKET), Math.floor(y / BUCKET)));
+  return arr || EMPTY;
+}
+
+/* ============================================================= */
+/*  COLLISION                                                    */
+/* ============================================================= */
+function hitsWall(px, py){
+  const r = player.r, r2 = r * r;
+  const arr = bucketAt(px, py);
+
+  for(let i = 0; i < arr.length; i++){
+    const j = arr[i];
+    const x1 = segs[j],   y1 = segs[j+1];
+    const x2 = segs[j+2], y2 = segs[j+3];
+
+    if(px < (x1 < x2 ? x1 : x2) - r) continue;
+    if(px > (x1 > x2 ? x1 : x2) + r) continue;
+    if(py < (y1 < y2 ? y1 : y2) - r) continue;
+    if(py > (y1 > y2 ? y1 : y2) + r) continue;
+
+    const dx = x2 - x1, dy = y2 - y1;
+    const len2 = dx*dx + dy*dy;
+    let t = len2 > 0 ? ((px - x1)*dx + (py - y1)*dy) / len2 : 0;
+    if(t < 0) t = 0; else if(t > 1) t = 1;
+
+    const ex = px - (x1 + dx * t);
+    const ey = py - (y1 + dy * t);
+    if(ex*ex + ey*ey < r2) return true;
+  }
+  return false;
+}
+
+/* ============================================================= */
+/*  NAVIGATOR (path-based)                                       */
+/* ============================================================= */
+function updateNavigator(){
+  const pcx = Math.floor(player.x / s);
+  const pcy = Math.floor(player.y / s);
+  if(pcx === navCell.x && pcy === navCell.y) return;
+  navCell.x = pcx; navCell.y = pcy;
+
+  const idx = pathIdxMap.get(pcy * W + pcx);
+  if(idx === undefined) return;  // off-path (shouldn't happen)
+
+  const L = path.length;
+
+  let fromIdx, toIdx;
+  if(idx + 2 <= L - 1){
+    // look one tile into the future
+    fromIdx = idx + 1;
+    toIdx   = idx + 2;
+  } else if(idx + 1 <= L - 1){
+    // about to reach the goal, point at the goal
+    fromIdx = idx;
+    toIdx   = idx + 1;
+  } else {
+    // at the goal, hold current angle
+    return;
+  }
+
+  const dx = path[toIdx][0] - path[fromIdx][0];
+  const dy = path[toIdx][1] - path[fromIdx][1];
+
+  if(dx > 0)       navAngleTarget = 0;
+  else if(dx < 0)  navAngleTarget = Math.PI;
+  else if(dy > 0)  navAngleTarget = Math.PI / 2;
+  else if(dy < 0)  navAngleTarget = -Math.PI / 2;
+}
+
+/* ============================================================= */
+/*  EVENTS                                                       */
+/* ============================================================= */
+let msgTimeout = 0;
+function showMsg(text){
+  msgEl.textContent = text;
+  msgEl.classList.add('on');
+  clearTimeout(msgTimeout);
+  msgTimeout = setTimeout(function(){ msgEl.classList.remove('on'); }, 650);
+}
+
+function crash(){
+  G.state = 'dead';
+  G.timer = 0.55;
+  G.shake = 9;
+  showMsg('CRASH');
+}
+
+function win(){
+  G.state = 'win';
+  G.timer = 0.35;
+  G.white = 1;
+}
+
+function resetLevel(){
+  player.x = (startCell.x + 0.5) * s;
+  player.y = (startCell.y + 0.5) * s;
+  player.ang = Math.atan2(runwayDir.y, runwayDir.x);
+  player.vx = Math.cos(player.ang) * G.maxSpeed;
+  player.vy = Math.sin(player.ang) * G.maxSpeed;
+  angVel = 0;
+
+  trail = [{ x: player.x, y: player.y }];
+  lookX = player.x;
+  lookY = player.y;
+
+  cam.x = player.x - CW / 2;
+  cam.y = player.y - CH / 2;
+
+  navCell.x = -1; navCell.y = -1;
+  navAngle = Math.atan2(runwayDir.y, runwayDir.x);
+  navAngleTarget = navAngle;
+
+  G.levelTime = 0;
+  G.delay     = 0.30;
+  G.state     = 'play';
+  G.timer     = 0;
+}
+
+/* ============================================================= */
+/*  UPDATE                                                       */
+/* ============================================================= */
+const TURN      = 4.4;
+const TURN_EASE = 30;
+
+/* how many cells ahead the camera looks */
+const CAM_LOOKAHEAD_CELLS = 3;
+const CAM_LOOKAHEAD_MIX   = 0.42;
+
+function update(dt){
+  if(G.shake > 0) G.shake = Math.max(0, G.shake - dt * 42);
+
+  /* tween navigator angle (always, regardless of state) */
+  let ndiff = navAngleTarget - navAngle;
+  while(ndiff >  Math.PI) ndiff -= Math.PI * 2;
+  while(ndiff < -Math.PI) ndiff += Math.PI * 2;
+  navAngle += ndiff * (1 - Math.exp(-12 * dt));
+
+  if(G.state === 'play'){
+    if(G.delay > 0){
+      G.delay -= dt;
+      angVel += (0 - angVel) * (1 - Math.exp(-TURN_EASE * dt));
+      return;
+    }
+
+    G.levelTime += dt;
+
+    /* ---- steering: instant input, eased angular velocity ---- */
+    const targetAngVel = steerTarget * TURN;
+    angVel += (targetAngVel - angVel) * (1 - Math.exp(-TURN_EASE * dt));
+    player.ang += angVel * dt;
+
+    /* ---- no momentum: velocity follows facing ---- */
+    const cos = Math.cos(player.ang);
+    const sin = Math.sin(player.ang);
+    player.vx = cos * G.maxSpeed;
+    player.vy = sin * G.maxSpeed;
+
+    const dx = player.vx * dt;
+    const dy = player.vy * dt;
+    const dist = Math.hypot(dx, dy);
+    const steps = Math.max(1, Math.ceil(dist / 3));
+
+    for(let i = 0; i < steps; i++){
+      player.x += dx / steps;
+      player.y += dy / steps;
+      if(hitsWall(player.x, player.y)){ crash(); return; }
+    }
+
+    /* ---- trail ---- */
+    const lastT = trail[trail.length - 1];
+    const tdx = player.x - lastT.x;
+    const tdy = player.y - lastT.y;
+    if(tdx*tdx + tdy*tdy > 14){
+      trail.push({ x: player.x, y: player.y });
+      if(trail.length > 3000) trail.shift();
+    }
+
+    updateNavigator();
+
+    /* ---- camera lookahead along the path ---- */
+    const pcx = Math.floor(player.x / s);
+    const pcy = Math.floor(player.y / s);
+    const idx = pathIdxMap.get(pcy * W + pcx);
+    if(idx !== undefined){
+      const lookIdx = Math.min(path.length - 1, idx + CAM_LOOKAHEAD_CELLS);
+      const tx = (path[lookIdx][0] + 0.5) * s;
+      const ty = (path[lookIdx][1] + 0.5) * s;
+      const k = 1 - Math.exp(-5 * dt);
+      lookX += (tx - lookX) * k;
+      lookY += (ty - lookY) * k;
+    }
+
+    const camOffX = (lookX - player.x) * CAM_LOOKAHEAD_MIX;
+    const camOffY = (lookY - player.y) * CAM_LOOKAHEAD_MIX;
+    const camTargetX = player.x + camOffX - CW / 2;
+    const camTargetY = player.y + camOffY - CH / 2;
+    const ck = 1 - Math.exp(-8 * dt);
+    cam.x += (camTargetX - cam.x) * ck;
+    cam.y += (camTargetY - cam.y) * ck;
+
+    /* ---- goal ---- */
+    const gr = Math.max(8, s * 0.055);
+    if(Math.hypot(player.x - goalX, player.y - goalY) < gr){
+      win();
+      return;
+    }
+  }
+  else if(G.state === 'dead'){
+    G.timer -= dt;
+    if(G.timer <= 0) resetLevel();
+    const ck = 1 - Math.exp(-9 * dt);
+    cam.x += (player.x - CW / 2 - cam.x) * ck;
+    cam.y += (player.y - CH / 2 - cam.y) * ck;
+  }
+  else if(G.state === 'win'){
+    G.timer -= dt;
+    if(G.timer <= 0){
+      G.level++;
+      buildLevel();
+    }
+  }
+
+  if(G.state !== 'win' && G.white > 0){
+    G.white = Math.max(0, G.white - dt * 2.5);
+  }
+}
+
+/* ============================================================= */
+/*  RENDER                                                       */
+/* ============================================================= */
+function render(){
+  ctx.fillStyle = bgBase;
+  ctx.fillRect(0, 0, CW, CH);
+
+  let shakeX = 0, shakeY = 0;
+  if(G.shake > 0.2){
+    shakeX = (Math.random() - 0.5) * G.shake;
+    shakeY = (Math.random() - 0.5) * G.shake;
+  }
+
+  const camX = cam.x + shakeX;
+  const camY = cam.y + shakeY;
+
+  const vL = camX - 16, vR = camX + CW + 16;
+  const vT = camY - 16, vB = camY + CH + 16;
+
+  ctx.lineCap  = 'round';
+  ctx.lineJoin = 'round';
+
+  /* ---------------- goal ---------------- */
+  const pulse = 0.5 + 0.5 * Math.sin(G.levelTime * 6.0);
+  const gsz = 8 + pulse * 3.5;
+
+  ctx.save();
+  ctx.translate(goalX - camX, goalY - camY);
+  ctx.rotate(G.levelTime * 1.1);
+  ctx.shadowColor = wallBright;
+  ctx.shadowBlur  = 18;
+  ctx.strokeStyle = wallBright;
+  ctx.lineWidth   = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, -gsz);
+  ctx.lineTo(gsz, 0);
+  ctx.lineTo(0, gsz);
+  ctx.lineTo(-gsz, 0);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+  ctx.shadowBlur = 0;
+
+  /* ---------------- walls (square segments) ---------------- */
+  const wp = new Path2D();
+  let visible = 0;
+
+  for(let i = 0; i < segs.length; i += 4){
+    const x1 = segs[i],   y1 = segs[i+1];
+    const x2 = segs[i+2], y2 = segs[i+3];
+
+    if(x1 < vL && x2 < vL) continue;
+    if(x1 > vR && x2 > vR) continue;
+    if(y1 < vT && y2 < vT) continue;
+    if(y1 > vB && y2 > vB) continue;
+
+    wp.moveTo(x1 - camX, y1 - camY);
+    wp.lineTo(x2 - camX, y2 - camY);
+    visible++;
+  }
+
+  if(visible){
+    ctx.strokeStyle = wallGlow;
+    ctx.lineWidth = 10;
+    ctx.stroke(wp);
+
+    ctx.strokeStyle = wallColor;
+    ctx.lineWidth = 2;
+    ctx.stroke(wp);
+  }
+
+  /* ---------------- trail ---------------- */
+  if(trail.length > 1){
+    ctx.beginPath();
+    ctx.moveTo(trail[0].x - camX, trail[0].y - camY);
+    for(let i = 1; i < trail.length; i++){
+      ctx.lineTo(trail[i].x - camX, trail[i].y - camY);
+    }
+    ctx.lineTo(player.x - camX, player.y - camY);
+
+    ctx.lineWidth   = 1;
+    ctx.strokeStyle = accentSoft;
+    ctx.globalAlpha = 0.9;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- player ---------------- */
+  const px = player.x - camX;
+  const py = player.y - camY;
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(player.ang);
+
+  ctx.shadowColor = accent;
+  ctx.shadowBlur  = 10;
+  ctx.fillStyle   = accent;
+
+  ctx.beginPath();
+  ctx.moveTo( 7.0,  0);
+  ctx.lineTo(-4.8, -4.5);
+  ctx.lineTo(-2.2,  0);
+  ctx.lineTo(-4.8,  4.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  ctx.shadowBlur = 0;
+
+  /* ---------------- navigator ---------------- */
+  renderNavigator();
+
+  /* ---------------- white flash ---------------- */
+  if(G.white > 0){
+    ctx.fillStyle = 'rgba(255,255,255,' + G.white + ')';
+    ctx.fillRect(0, 0, CW, CH);
+  }
+}
+
+/* ------------------------------------------------------------- */
+/*  navigator arrow (uses tweened navAngle)                      */
+/* ------------------------------------------------------------- */
+function renderNavigator(){
+  const cx = CW - 48;
+  const cy = 48;
+  const R  = 17;
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, R + 13, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 1.5;
+  for(let i = 0; i < 4; i++){
+    const a = i * Math.PI / 2;
+    const c = Math.cos(a), sn = Math.sin(a);
+    ctx.beginPath();
+    ctx.moveTo(cx + c * (R + 3), cy + sn * (R + 3));
+    ctx.lineTo(cx + c * (R + 8), cy + sn * (R + 8));
+    ctx.stroke();
+  }
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(navAngle);
+
+  ctx.shadowColor = accent;
+  ctx.shadowBlur  = 12;
+  ctx.fillStyle   = accent;
+
+  ctx.beginPath();
+  ctx.moveTo( 12,  0);
+  ctx.lineTo(-7.5, -9);
+  ctx.lineTo(-3.2,  0);
+  ctx.lineTo(-7.5,  9);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+  ctx.shadowBlur = 0;
+}
+
+/* ============================================================= */
+/*  HUD                                                          */
+/* ============================================================= */
+let hudCache = '';
+function updateHud(){
+  const str = 'LEVEL <b>' + G.level + '</b>';
+  if(str !== hudCache){
+    hudCache = str;
+    hudEl.innerHTML = str;
+    const b = hudEl.querySelector('b');
+    if(b) b.style.color = accent;
+  }
+}
+
+let timerCache = '';
+function updateTimer(){
+  const total = Math.max(0, Math.floor(G.levelTime * 1000));
+  const secs  = Math.floor(total / 1000);
+  const ms    = total % 1000;
+  const str = (secs < 10 ? '0' : '') + secs + ':' +
+              (ms < 100 ? (ms < 10 ? '00' : '0') : '') + ms;
+  if(str !== timerCache){ timerCache = str; timerEl.textContent = str; }
+}
+
+/* ============================================================= */
+/*  MAIN LOOP                                                    */
+/* ============================================================= */
+let last = performance.now();
+function frame(now){
+  let dt = (now - last) / 1000;
+  last = now;
+  if(dt > 0.05) dt = 0.05;
+  if(dt < 0) dt = 0;
+
+  update(dt);
+  render();
+  updateHud();
+  updateTimer();
+
+  requestAnimationFrame(frame);
+}
+
+/* ============================================================= */
+/*  BOOT                                                         */
+/* ============================================================= */
+resize();
+buildLevel();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
