@@ -4,38 +4,60 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>Path Runner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
   html, body {
     margin: 0; height: 100%; background: #05060a; overflow: hidden;
-    font-family: 'Lucida Console', 'Monaco', 'Consolas', 'Andale Mono', 'Courier New', monospace;
-    font-weight: bold;
+    font-family: 'Press Start 2P', 'Lucida Console', 'Monaco', 'Consolas', 'Courier New', monospace;
+    font-weight: normal;
     -webkit-user-select: none; user-select: none;
     touch-action: none;
     font-variant-ligatures: none;
     transition: background .5s;
+    -webkit-font-smoothing: none;
+    font-smooth: never;
+    text-rendering: geometricPrecision;
   }
   canvas { display: block; }
   #hud {
     position: fixed; top: 14px; left: 16px;
-    font-size: 11px; letter-spacing: 4px;
+    font-size: 9px; letter-spacing: 2px;
     pointer-events: none;
     text-transform: uppercase;
     transition: color .5s;
+    line-height: 1.6;
   }
-  #hud b { font-weight: bold; letter-spacing: 5px; }
+  #hud b { font-weight: normal; letter-spacing: 2px; }
   #timer {
     position: fixed; top: 14px; left: 50%;
     transform: translateX(-50%);
-    font-size: 14px; letter-spacing: 6px;
+    font-size: 11px; letter-spacing: 1px;
     pointer-events: none;
     text-transform: uppercase;
-    font-variant-numeric: tabular-nums;
     transition: color .5s;
+    white-space: nowrap;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  #timer .par {
+    color: rgba(255,255,255,0.35);
+    font-size: 8px;
+    letter-spacing: 1px;
+  }
+  #timer .tminus {
+    font-size: 9px;
+    letter-spacing: 1px;
+  }
+  #timer .tminus.over {
+    color: #ff5566;
   }
   #msg {
     position: fixed; left: 0; right: 0; top: 42%;
     text-align: center;
-    font-size: 22px; letter-spacing: 14px;
+    font-size: 16px; letter-spacing: 5px;
     pointer-events: none; opacity: 0;
     transition: opacity .1s, color .5s;
     text-transform: uppercase;
@@ -44,22 +66,22 @@
   #hint {
     position: fixed; bottom: 14px; left: 0; right: 0;
     text-align: center;
-    font-size: 10px; letter-spacing: 5px;
-    pointer-events: none; opacity: .5;
+    font-size: 7px; letter-spacing: 2px;
+    pointer-events: none; opacity: .55;
     text-transform: uppercase;
     transition: color .5s, opacity .5s;
   }
   #btn {
     position: fixed; left: 50%; top: 56%;
     transform: translate(-50%,-50%) scale(.88);
-    padding: 15px 36px;
+    padding: 16px 30px;
     font-family: inherit;
-    font-weight: bold;
-    font-size: 13px;
-    letter-spacing: 7px;
+    font-weight: normal;
+    font-size: 9px;
+    letter-spacing: 3px;
     text-transform: uppercase;
     color: #fff;
-    background: rgba(0,0,0,0.30);
+    background: rgba(0,0,0,0.35);
     border: 2px solid currentColor;
     border-radius: 3px;
     cursor: pointer;
@@ -69,6 +91,8 @@
     transition: opacity .1s, transform .1s, color .5s, box-shadow .1s;
     -webkit-tap-highlight-color: transparent;
     touch-action: manipulation;
+    -webkit-font-smoothing: none;
+    font-smooth: never;
   }
   #btn.on {
     opacity: 1;
@@ -83,7 +107,11 @@
 <body>
 <canvas id="c"></canvas>
 <div id="hud"></div>
-<div id="timer">00:000</div>
+<div id="timer">
+  <span id="tCur">00:000</span>
+  <span class="par" id="tPar">/ 00:000</span>
+  <span class="tminus" id="tMinus">T-00:000</span>
+</div>
 <div id="msg"></div>
 <button id="btn" type="button"></button>
 <div id="hint">◀ tap left &nbsp;·&nbsp; tap right ▶ &nbsp;·&nbsp; hold both = boost</div>
@@ -95,6 +123,9 @@ const cv      = document.getElementById('c');
 const ctx     = cv.getContext('2d');
 const hudEl   = document.getElementById('hud');
 const timerEl = document.getElementById('timer');
+const tCurEl  = document.getElementById('tCur');
+const tParEl  = document.getElementById('tPar');
+const tMinEl  = document.getElementById('tMinus');
 const msgEl   = document.getElementById('msg');
 const hintEl  = document.getElementById('hint');
 const btnEl   = document.getElementById('btn');
@@ -141,7 +172,7 @@ function pickColors(){
 /*  GLOBE WARP (precomputed per resize)                          */
 /* ============================================================= */
 const WARP_GRID = 24;
-const WARP_K    = 0.4;      /* curvature strength (0 = flat)   */
+const WARP_K    = 0.50;      /* curvature strength               */
 let warpTable  = null;
 let warpCellW  = 0;
 let warpCellH  = 0;
@@ -175,10 +206,10 @@ function buildWarpTable(){
       const dh  = cellH * sc;
 
       /* slight overdraw hides tiny seams between cells */
-      arr[k++] = dcx - dw * 0.5 - 0.75;
-      arr[k++] = dcy - dh * 0.5 - 0.75;
-      arr[k++] = dw + 1.5;
-      arr[k++] = dh + 1.5;
+      arr[k++] = dcx - dw * 0.5 - 1.5;
+      arr[k++] = dcy - dh * 0.5 - 1.5;
+      arr[k++] = dw + 3.0;
+      arr[k++] = dh + 3.0;
     }
   }
 
@@ -223,6 +254,7 @@ const G = {
   level: 1,
   state: 'play',
   levelTime: 0,
+  parTime: 10,
   shake: 0,
   maxSpeed: 210,
   boosting: false
@@ -265,14 +297,22 @@ let navCell        = { x:-1, y:-1 };
 const cam = { x:0, y:0 };
 
 /* ============================================================= */
-/*  BOOST                                                        */
+/*  BOOST + ACCELERATION RAMP                                    */
 /* ============================================================= */
-const BOOST_MULT         = 1.8;   // speed multiplier while boosting
-const BOOST_HOLD_REFRESH = 0.30;  // boost lingers this long after release
+const BOOST_MULT_BASE    = 1.8;   /* starting multiplier            */
+const BOOST_HOLD_REFRESH = 0.30;  /* boost lingers after release    */
+const BOOST_RAMP_RATE    = 0.55;  /* +mult per second while held    */
+const BOOST_RAMP_MAX     = 3.2;   /* max added multiplier           */
+
 let boostTime  = 0;
 let boostPrev  = false;
 let boostGlow  = 0;
+let boostRamp  = 0;               /* accumulated acceleration       */
 let shockwaves = [];
+
+function currentBoostMult(){
+  return BOOST_MULT_BASE + boostRamp;
+}
 
 /* ============================================================= */
 /*  BUTTON / ACTION                                              */
@@ -473,6 +513,12 @@ function buildLevel(){
   goalX = (goalCell.x + 0.5) * s;
   goalY = (goalCell.y + 0.5) * s;
 
+  /* ---- PAR TIME (estimated time to beat the level) ---- */
+  {
+    const cellTime = s / G.maxSpeed;
+    G.parTime = path.length * cellTime * 0.62 + 0.6;
+  }
+
   /* ---- walls: 4 sides of each path cell minus the openings ---- */
   segs = [];
   for(let i = 0; i < path.length; i++){
@@ -538,6 +584,7 @@ function buildLevel(){
   boostTime = 0;
   boostPrev = false;
   boostGlow = 0;
+  boostRamp = 0;
   G.boosting = false;
 
   keys.clear(); pointers.clear();
@@ -715,6 +762,7 @@ function resetLevel(){
   boostTime = 0;
   boostPrev = false;
   boostGlow = 0;
+  boostRamp = 0;
   G.boosting = false;
 
   G.levelTime = 0;
@@ -755,10 +803,10 @@ function update(dt){
 
   const bothHeld = leftHeld && rightHeld;
 
-  /* ---------------- boost + shockwave ---------------- */
+  /* ---------------- boost + acceleration + shockwave ---------------- */
   if(bothHeld && G.state === 'play'){
     if(!boostPrev){
-      /* rising edge -> trigger */
+      /* rising edge -> trigger shockwave */
       shockwaves.push({
         x: player.x,
         y: player.y,
@@ -768,12 +816,16 @@ function update(dt){
       });
       G.shake = Math.max(G.shake, 3);
       boostGlow = 1;
+      boostRamp = 0; /* start fresh ramp */
     }
     boostTime = BOOST_HOLD_REFRESH;
+    /* accelerate while held */
+    boostRamp = Math.min(BOOST_RAMP_MAX, boostRamp + BOOST_RAMP_RATE * dt);
   }
   boostPrev = bothHeld;
 
   if(boostTime > 0) boostTime -= dt;
+  else boostRamp = 0;  /* reset acceleration when boost ends */
   if(boostGlow > 0) boostGlow = Math.max(0, boostGlow - dt * 2.4);
 
   const boosting = boostTime > 0 && G.state === 'play';
@@ -789,7 +841,8 @@ function update(dt){
   if(G.state === 'play'){
     G.levelTime += dt;
 
-    const speed = G.maxSpeed * (boosting ? BOOST_MULT : 1);
+    const mul   = boosting ? currentBoostMult() : 1;
+    const speed = G.maxSpeed * mul;
     const dirv  = DIR_VEC[player.dir];
     const dx    = dirv[0] * speed * dt;
     const dy    = dirv[1] * speed * dt;
@@ -915,8 +968,9 @@ function render(){
     r.lineTo(player.x - camX, player.y - camY);
 
     if(G.boosting){
-      r.lineWidth   = 2.0;
-      r.strokeStyle = 'hsla(' + hue + ',95%,72%,0.95)';
+      const t = Math.min(1, boostRamp / BOOST_RAMP_MAX);
+      r.lineWidth   = 2.0 + t * 1.4;
+      r.strokeStyle = 'hsla(' + hue + ',95%,' + (72 + t * 15) + '%,0.95)';
     } else {
       r.lineWidth   = 1.4;
       r.strokeStyle = 'rgba(255,255,255,0.85)';
@@ -1034,14 +1088,31 @@ function updateHud(){
   }
 }
 
-let timerCache = '';
-function updateTimer(){
-  const total = Math.max(0, Math.floor(G.levelTime * 1000));
+function formatTime(t){
+  const total = Math.max(0, Math.floor(t * 1000));
   const secs  = Math.floor(total / 1000);
   const ms    = total % 1000;
-  const str = (secs < 10 ? '0' : '') + secs + ':' +
-              (ms < 100 ? (ms < 10 ? '00' : '0') : '') + ms;
-  if(str !== timerCache){ timerCache = str; timerEl.textContent = str; }
+  return (secs < 10 ? '0' : '') + secs + ':' +
+         (ms < 100 ? (ms < 10 ? '00' : '0') : '') + ms;
+}
+
+let curCache = '', parCache = '', minCache = '', overCache = null;
+function updateTimer(){
+  const curStr = formatTime(G.levelTime);
+  if(curStr !== curCache){ curCache = curStr; tCurEl.textContent = curStr; }
+
+  const parStr = formatTime(G.parTime);
+  if(parStr !== parCache){ parCache = parStr; tParEl.textContent = '/ ' + parStr; }
+
+  const remain = G.parTime - G.levelTime;
+  const over   = remain < 0;
+  const minStr = (over ? 'T+' : 'T-') + formatTime(Math.abs(remain));
+  if(minStr !== minCache){ minCache = minStr; tMinEl.textContent = minStr; }
+
+  if(over !== overCache){
+    overCache = over;
+    tMinEl.classList.toggle('over', over);
+  }
 }
 
 /* ============================================================= */
