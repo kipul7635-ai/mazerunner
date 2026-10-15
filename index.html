@@ -33,7 +33,7 @@
     transition: color .5s;
   }
   #msg {
-    position: fixed; left: 0; right: 0; top: 45%;
+    position: fixed; left: 0; right: 0; top: 42%;
     text-align: center;
     font-size: 22px; letter-spacing: 14px;
     pointer-events: none; opacity: 0;
@@ -49,6 +49,35 @@
     text-transform: uppercase;
     transition: color .5s, opacity .5s;
   }
+  #btn {
+    position: fixed; left: 50%; top: 56%;
+    transform: translate(-50%,-50%) scale(.88);
+    padding: 15px 36px;
+    font-family: inherit;
+    font-weight: bold;
+    font-size: 13px;
+    letter-spacing: 7px;
+    text-transform: uppercase;
+    color: #fff;
+    background: rgba(0,0,0,0.30);
+    border: 2px solid currentColor;
+    border-radius: 3px;
+    cursor: pointer;
+    outline: none;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s, transform .18s, color .5s, box-shadow .18s;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  #btn.on {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%,-50%) scale(1);
+  }
+  #btn:hover, #btn:focus {
+    box-shadow: 0 0 22px currentColor;
+  }
 </style>
 </head>
 <body>
@@ -56,6 +85,7 @@
 <div id="hud"></div>
 <div id="timer">00:000</div>
 <div id="msg"></div>
+<button id="btn" type="button"></button>
 <div id="hint">◀ tap left &nbsp;·&nbsp; tap right ▶</div>
 <script>
 (function(){
@@ -67,26 +97,25 @@ const hudEl   = document.getElementById('hud');
 const timerEl = document.getElementById('timer');
 const msgEl   = document.getElementById('msg');
 const hintEl  = document.getElementById('hint');
+const btnEl   = document.getElementById('btn');
 
 let CW = 0, CH = 0;
 
 /* ============================================================= */
-/*  THEME                                                        */
+/*  THEME  —  walls use the SAME colour as the accent            */
 /* ============================================================= */
 let hue = 200;
 let accent     = 'hsl(200,95%,62%)';
 let accentSoft = 'hsla(200,95%,62%,0.55)';
-let wallColor  = 'hsl(20,95%,62%)';
-let wallGlow   = 'hsla(20,95%,62%,0.13)';
+let wallColor  = 'hsl(200,95%,62%)';
+let wallGlow   = 'hsla(200,95%,62%,0.13)';
 let bgBase     = 'hsl(200,40%,4%)';
 
 function applyTheme(){
-  const comp = (hue + 180) % 360;
-
   accent     = 'hsl(' + hue + ',95%,62%)';
   accentSoft = 'hsla(' + hue + ',95%,62%,0.55)';
-  wallColor  = 'hsl(' + comp + ',95%,62%)';
-  wallGlow   = 'hsla(' + comp + ',95%,62%,0.13)';
+  wallColor  = accent;
+  wallGlow   = 'hsla(' + hue + ',95%,62%,0.13)';
   bgBase     = 'hsl(' + hue + ',40%,4%)';
 
   document.body.style.background = bgBase;
@@ -94,6 +123,7 @@ function applyTheme(){
   timerEl.style.color = accent;
   msgEl.style.color   = accent;
   hintEl.style.color  = accentSoft;
+  btnEl.style.color   = accent;
   const b = hudEl.querySelector('b');
   if(b) b.style.color = accent;
 }
@@ -121,7 +151,6 @@ const G = {
   timer: 0,
   delay: 0,
   levelTime: 0,
-  white: 0,
   shake: 0,
   maxSpeed: 210
 };
@@ -137,6 +166,10 @@ const BPAD   = 44;
 
 let W = 0, H = 0;
 let s = 200;
+
+/* wall stroke widths, scaled with corridor size */
+let wallGlowW = 10;
+let wallCoreW = 2;
 
 let path       = [];          // array of [x,y] grid cells forming the corridor
 let pathIdxMap = new Map();   // key (y*W + x) -> index into path
@@ -156,10 +189,41 @@ let navAngle       = 0;
 let navAngleTarget = 0;
 let navCell        = { x:-1, y:-1 };
 
-/* camera lookahead */
-let lookX = 0, lookY = 0;
-
 const cam = { x:0, y:0 };
+
+/* ============================================================= */
+/*  BUTTON / ACTION                                              */
+/* ============================================================= */
+let btnAction = null;
+let btnTimer  = null;
+
+function showButton(label, action, delay){
+  clearTimeout(btnTimer);
+  btnAction = action;
+  btnTimer = setTimeout(function(){
+    btnEl.textContent = label;
+    btnEl.classList.add('on');
+  }, delay || 0);
+}
+
+function hideButton(){
+  clearTimeout(btnTimer);
+  btnAction = null;
+  btnEl.classList.remove('on');
+}
+
+btnEl.addEventListener('click', function(e){
+  e.preventDefault();
+  e.stopPropagation();
+  const a = btnAction;
+  hideButton();
+  if(a === 'restart'){
+    resetLevel();
+  } else if(a === 'continue'){
+    G.level++;
+    buildLevel();
+  }
+});
 
 /* ============================================================= */
 /*  INPUT  (instant 90° turns)                                   */
@@ -182,6 +246,11 @@ function turnRight(){
 }
 
 addEventListener('keydown', function(e){
+  if((e.key === 'Enter' || e.key === ' ') && btnAction){
+    e.preventDefault();
+    btnEl.click();
+    return;
+  }
   const k = KEYMAP[e.key];
   if(!k) return;
   e.preventDefault();
@@ -200,6 +269,7 @@ addEventListener('keyup', function(e){
 cv.addEventListener('contextmenu', function(e){ e.preventDefault(); });
 
 cv.addEventListener('pointerdown', function(e){
+  if(G.state !== 'play') return;
   e.preventDefault();
   const side = e.clientX < CW * 0.5 ? -1 : 1;
   if(side === -1) turnLeft(); else turnRight();
@@ -291,6 +361,7 @@ function generateCorridor(targetLen, N, attempts){
 /*  BUILD LEVEL                                                  */
 /* ============================================================= */
 function buildLevel(){
+  hideButton();
   pickColors();
 
   const level = G.level;
@@ -299,8 +370,14 @@ function buildLevel(){
   const N = Math.max(10, Math.ceil(Math.sqrt(targetLen) * 3.5)) + 4;
 
   W = N; H = N;
-  s = 200;
-  G.maxSpeed = Math.round((132 + level * 7) * 1.5);
+
+  /* ---- corridor narrows a little every level ---- */
+  s = Math.max(90, 200 * Math.pow(0.97, level - 1));
+
+  wallGlowW = Math.max(5,   s * 0.05);
+  wallCoreW = Math.max(1.2, s * 0.01);
+
+  G.maxSpeed = Math.round((132 + level * 7) * 1.5 * (s / 200));
 
   path = generateCorridor(targetLen, N, 300);
   if(path.length < 4){
@@ -371,8 +448,6 @@ function buildLevel(){
   }
 
   trail = [{ x: player.x, y: player.y }];
-  lookX = player.x;
-  lookY = player.y;
 
   cam.x = player.x - CW / 2;
   cam.y = player.y - CH / 2;
@@ -387,7 +462,6 @@ function buildLevel(){
   G.delay     = 0.40;
   G.state     = 'play';
   G.timer     = 0;
-  G.white     = 0;
   G.shake     = 0;
 }
 
@@ -456,6 +530,22 @@ function hitsWall(px, py){
   return false;
 }
 
+/* ------------------------------------------------------------- */
+/*  distance from player to the finish line segment              */
+/* ------------------------------------------------------------- */
+function distToGoalWall(){
+  if(!goalWall) return 1e9;
+  const x1 = goalWall[0], y1 = goalWall[1];
+  const x2 = goalWall[2], y2 = goalWall[3];
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx*dx + dy*dy;
+  let t = len2 > 0 ? ((player.x - x1)*dx + (player.y - y1)*dy) / len2 : 0;
+  if(t < 0) t = 0; else if(t > 1) t = 1;
+  const ex = player.x - (x1 + dx * t);
+  const ey = player.y - (y1 + dy * t);
+  return Math.sqrt(ex*ex + ey*ey);
+}
+
 /* ============================================================= */
 /*  NAVIGATOR (path-based, one tile ahead)                       */
 /* ============================================================= */
@@ -503,18 +593,19 @@ function showMsg(text){
 
 function crash(){
   G.state = 'dead';
-  G.timer = 0.55;
   G.shake = 9;
   showMsg('CRASH');
+  showButton('restart', 'restart', 320);
 }
 
 function win(){
   G.state = 'win';
-  G.timer = 0.35;
-  G.white = 1;
+  showButton('continue', 'continue', 220);
 }
 
 function resetLevel(){
+  hideButton();
+
   player.x = (startCell.x + 0.5) * s;
   player.y = (startCell.y + 0.5) * s;
 
@@ -528,8 +619,6 @@ function resetLevel(){
   visAng     = player.ang;
 
   trail = [{ x: player.x, y: player.y }];
-  lookX = player.x;
-  lookY = player.y;
 
   cam.x = player.x - CW / 2;
   cam.y = player.y - CH / 2;
@@ -542,14 +631,12 @@ function resetLevel(){
   G.delay     = 0.30;
   G.state     = 'play';
   G.timer     = 0;
+  G.shake     = 0;
 }
 
 /* ============================================================= */
 /*  UPDATE                                                       */
 /* ============================================================= */
-const CAM_LOOKAHEAD_CELLS = 1;
-const CAM_LOOKAHEAD_MIX   = 0.40;
-
 function update(dt){
   if(G.shake > 0) G.shake = Math.max(0, G.shake - dt * 42);
 
@@ -588,6 +675,10 @@ function update(dt){
     for(let i = 0; i < steps; i++){
       player.x += dx / steps;
       player.y += dy / steps;
+
+      /* ---- must actually reach the finish line ---- */
+      if(distToGoalWall() < player.r + 5){ win(); return; }
+
       if(hitsWall(player.x, player.y)){ crash(); return; }
     }
 
@@ -601,51 +692,15 @@ function update(dt){
     }
 
     updateNavigator();
+  }
 
-    /* ---- camera lookahead along path ---- */
-    const pcx = Math.floor(player.x / s);
-    const pcy = Math.floor(player.y / s);
-    const idx = pathIdxMap.get(pcy * W + pcx);
-    if(idx !== undefined){
-      const lookIdx = Math.min(path.length - 1, idx + CAM_LOOKAHEAD_CELLS);
-      const tx = (path[lookIdx][0] + 0.5) * s;
-      const ty = (path[lookIdx][1] + 0.5) * s;
-      const k = 1 - Math.exp(-5 * dt);
-      lookX += (tx - lookX) * k;
-      lookY += (ty - lookY) * k;
-    }
-
-    const camOffX = (lookX - player.x) * CAM_LOOKAHEAD_MIX;
-    const camOffY = (lookY - player.y) * CAM_LOOKAHEAD_MIX;
-    const camTargetX = player.x + camOffX - CW / 2;
-    const camTargetY = player.y + camOffY - CH / 2;
+  /* ---- camera: locked straight onto the player (no lookahead) ---- */
+  {
+    const camTargetX = player.x - CW / 2;
+    const camTargetY = player.y - CH / 2;
     const ck = 1 - Math.exp(-7 * dt);
     cam.x += (camTargetX - cam.x) * ck;
     cam.y += (camTargetY - cam.y) * ck;
-
-    /* ---- goal (enter the goal cell) ---- */
-    if(pcx === goalCell.x && pcy === goalCell.y){
-      win();
-      return;
-    }
-  }
-  else if(G.state === 'dead'){
-    G.timer -= dt;
-    if(G.timer <= 0) resetLevel();
-    const ck = 1 - Math.exp(-9 * dt);
-    cam.x += (player.x - CW / 2 - cam.x) * ck;
-    cam.y += (player.y - CH / 2 - cam.y) * ck;
-  }
-  else if(G.state === 'win'){
-    G.timer -= dt;
-    if(G.timer <= 0){
-      G.level++;
-      buildLevel();
-    }
-  }
-
-  if(G.state !== 'win' && G.white > 0){
-    G.white = Math.max(0, G.white - dt * 2.5);
   }
 }
 
@@ -691,11 +746,11 @@ function render(){
 
   if(visible){
     ctx.strokeStyle = wallGlow;
-    ctx.lineWidth = 10;
+    ctx.lineWidth = wallGlowW;
     ctx.stroke(wp);
 
     ctx.strokeStyle = wallColor;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = wallCoreW;
     ctx.stroke(wp);
   }
 
@@ -703,10 +758,10 @@ function render(){
   if(goalWall){
     const pulse = 0.55 + 0.45 * Math.sin(G.levelTime * 4);
     ctx.save();
-    ctx.shadowColor = '#ffffff';
+    ctx.shadowColor = accent;
     ctx.shadowBlur  = 18 + pulse * 16;
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth   = 4;
+    ctx.lineWidth   = Math.max(2.5, s * 0.02);
     ctx.lineCap     = 'round';
     ctx.beginPath();
     ctx.moveTo(goalWall[0] - camX, goalWall[1] - camY);
@@ -763,12 +818,6 @@ function render(){
 
   /* ---------------- navigator ---------------- */
   renderNavigator();
-
-  /* ---------------- white flash ---------------- */
-  if(G.white > 0){
-    ctx.fillStyle = 'rgba(255,255,255,' + G.white + ')';
-    ctx.fillRect(0, 0, CW, CH);
-  }
 }
 
 /* ------------------------------------------------------------- */
