@@ -143,6 +143,7 @@ let hue = 200;
 let accent     = 'hsl(200,95%,62%)';
 let accentSoft = 'hsla(200,95%,62%,0.55)';
 let wallColor  = 'hsl(200,95%,62%)';
+let wallSide   = 'hsl(200,70%,22%)';
 let wallGlow   = 'hsla(200,95%,62%,0.13)';
 let bgBase     = 'hsl(200,40%,4%)';
 
@@ -150,6 +151,7 @@ function applyTheme(){
   accent     = 'hsl(' + hue + ',95%,62%)';
   accentSoft = 'hsla(' + hue + ',95%,62%,0.55)';
   wallColor  = accent;
+  wallSide   = 'hsl(' + hue + ',70%,22%)';
   wallGlow   = 'hsla(' + hue + ',95%,62%,0.13)';
   bgBase     = 'hsl(' + hue + ',40%,4%)';
 
@@ -275,6 +277,7 @@ let s = 200;
 /* wall stroke widths, scaled with corridor size */
 let wallGlowW = 10;
 let wallCoreW = 2;
+let wallHeight = 10;         /* visual 2.5D height in screen px  */
 
 let path       = [];          // array of [x,y] grid cells forming the corridor
 let pathIdxMap = new Map();   // key (y*W + x) -> index into path
@@ -492,8 +495,9 @@ function buildLevel(){
   /* ---- corridor narrows a little every level ---- */
   s = Math.max(90, 200 * Math.pow(0.97, level - 1));
 
-  wallGlowW = Math.max(5,   s * 0.05);
-  wallCoreW = Math.max(1.2, s * 0.01);
+  wallGlowW  = Math.max(5,   s * 0.05);
+  wallCoreW  = Math.max(1.2, s * 0.01);
+  wallHeight = Math.max(7,   s * 0.075);
 
   G.maxSpeed = Math.round((132 + level * 7) * 1.5 * (s / 200));
 
@@ -906,37 +910,96 @@ function render(){
   r.lineCap  = 'round';
   r.lineJoin = 'round';
 
-  /* ---------------- walls ---------------- */
-  const wp = new Path2D();
+  /* =============================================================
+     WALLS  —  extruded toward screen centre for a 2.5D feel
+     ============================================================= */
+  const scx = CW * 0.5;
+  const scy = CH * 0.5;
+  const EH  = wallHeight;                 /* extrude amount          */
+
+  const sidePath = new Path2D();          /* dark "wall side" quads  */
+  const topPath  = new Path2D();          /* bright "wall top" edge  */
   let visible = 0;
 
+  const pad = 24 + EH;
+
   for(let i = 0; i < segs.length; i += 4){
-    const x1 = segs[i],   y1 = segs[i+1];
-    const x2 = segs[i+2], y2 = segs[i+3];
+    const bx1 = segs[i]   - camX;
+    const by1 = segs[i+1] - camY;
+    const bx2 = segs[i+2] - camX;
+    const by2 = segs[i+3] - camY;
 
-    if(x1 < vL && x2 < vL) continue;
-    if(x1 > vR && x2 > vR) continue;
-    if(y1 < vT && y2 < vT) continue;
-    if(y1 > vB && y2 > vB) continue;
+    if(bx1 < -pad && bx2 < -pad) continue;
+    if(bx1 > CW+pad && bx2 > CW+pad) continue;
+    if(by1 < -pad && by2 < -pad) continue;
+    if(by1 > CH+pad && by2 > CH+pad) continue;
 
-    wp.moveTo(x1 - camX, y1 - camY);
-    wp.lineTo(x2 - camX, y2 - camY);
+    /* radial offset (toward screen centre) — walls stand "up" out of
+       the globe, so the extrude direction matches the curvature      */
+    const mx = (bx1 + bx2) * 0.5;
+    const my = (by1 + by2) * 0.5;
+    let ox = scx - mx;
+    let oy = scy - my;
+    const ol = Math.sqrt(ox*ox + oy*oy) || 1;
+    ox = ox / ol * EH;
+    oy = oy / ol * EH;
+
+    /* side face parallelogram */
+    sidePath.moveTo(bx1,     by1);
+    sidePath.lineTo(bx2,     by2);
+    sidePath.lineTo(bx2 + ox, by2 + oy);
+    sidePath.lineTo(bx1 + ox, by1 + oy);
+    sidePath.closePath();
+
+    /* top edge */
+    topPath.moveTo(bx1 + ox, by1 + oy);
+    topPath.lineTo(bx2 + ox, by2 + oy);
+
     visible++;
   }
 
   if(visible){
+    /* 1. soft glow around the top edge */
     r.strokeStyle = wallGlow;
-    r.lineWidth = wallGlowW;
-    r.stroke(wp);
+    r.lineWidth   = wallGlowW;
+    r.lineCap     = 'round';
+    r.stroke(topPath);
 
+    /* 2. dark side faces */
+    r.fillStyle = wallSide;
+    r.fill(sidePath);
+
+    /* 3. bright top edge */
     r.strokeStyle = wallColor;
-    r.lineWidth = wallCoreW;
-    r.stroke(wp);
+    r.lineWidth   = wallCoreW;
+    r.stroke(topPath);
   }
 
-  /* ---------------- glowing finish wall ---------------- */
+  /* ---------------- glowing finish wall (also extruded) ---------------- */
   if(goalWall){
     const pulse = 0.55 + 0.45 * Math.sin(G.levelTime * 4);
+
+    let gx1 = goalWall[0] - camX, gy1 = goalWall[1] - camY;
+    let gx2 = goalWall[2] - camX, gy2 = goalWall[3] - camY;
+
+    const gmx = (gx1 + gx2) * 0.5;
+    const gmy = (gy1 + gy2) * 0.5;
+    let gox = scx - gmx;
+    let goy = scy - gmy;
+    const gol = Math.sqrt(gox*gox + goy*goy) || 1;
+    gox = gox / gol * EH;
+    goy = goy / gol * EH;
+
+    /* side face */
+    r.fillStyle = 'hsla(' + hue + ',95%,45%,0.75)';
+    r.beginPath();
+    r.moveTo(gx1, gy1);
+    r.lineTo(gx2, gy2);
+    r.lineTo(gx2 + gox, gy2 + goy);
+    r.lineTo(gx1 + gox, gy1 + goy);
+    r.closePath();
+    r.fill();
+
     r.save();
     r.shadowColor = accent;
     r.shadowBlur  = 18 + pulse * 16;
@@ -944,15 +1007,15 @@ function render(){
     r.lineWidth   = Math.max(2.5, s * 0.02);
     r.lineCap     = 'round';
     r.beginPath();
-    r.moveTo(goalWall[0] - camX, goalWall[1] - camY);
-    r.lineTo(goalWall[2] - camX, goalWall[3] - camY);
+    r.moveTo(gx1 + gox, gy1 + goy);
+    r.lineTo(gx2 + gox, gy2 + goy);
     r.stroke();
 
     r.shadowBlur  = 34 + pulse * 22;
     r.globalAlpha = 0.55;
     r.beginPath();
-    r.moveTo(goalWall[0] - camX, goalWall[1] - camY);
-    r.lineTo(goalWall[2] - camX, goalWall[3] - camY);
+    r.moveTo(gx1 + gox, gy1 + goy);
+    r.lineTo(gx2 + gox, gy2 + goy);
     r.stroke();
     r.restore();
     r.globalAlpha = 1;
