@@ -78,7 +78,6 @@ let accent     = 'hsl(200,95%,62%)';
 let accentSoft = 'hsla(200,95%,62%,0.55)';
 let wallColor  = 'hsl(20,95%,62%)';
 let wallGlow   = 'hsla(20,95%,62%,0.13)';
-let wallBright = 'hsl(20,100%,78%)';
 let bgBase     = 'hsl(200,40%,4%)';
 
 function applyTheme(){
@@ -88,7 +87,6 @@ function applyTheme(){
   accentSoft = 'hsla(' + hue + ',95%,62%,0.55)';
   wallColor  = 'hsl(' + comp + ',95%,62%)';
   wallGlow   = 'hsla(' + comp + ',95%,62%,0.13)';
-  wallBright = 'hsl(' + comp + ',100%,78%)';
   bgBase     = 'hsl(' + hue + ',40%,4%)';
 
   document.body.style.background = bgBase;
@@ -128,6 +126,10 @@ const G = {
   maxSpeed: 210
 };
 
+/* Direction constants: 0=right, 1=down, 2=left, 3=up */
+const DIR_VEC = [[1,0],[0,1],[-1,0],[0,-1]];
+const DIR_ANG = [0, Math.PI/2, Math.PI, -Math.PI/2];
+
 let segs     = [];   // flat straight wall segments  x1,y1,x2,y2
 let buckets  = new Map();
 const BUCKET = 128;
@@ -139,15 +141,15 @@ let s = 200;
 let path       = [];          // array of [x,y] grid cells forming the corridor
 let pathIdxMap = new Map();   // key (y*W + x) -> index into path
 
-const player = { x:0, y:0, r:3.4, ang:0, vx:0, vy:0 };
-let angVel = 0;
+const player = { x:0, y:0, r:2.2, ang:0, dir:0 };
+let visAng = 0;               // visually smoothed player angle
 
 let trail = [];
 
 let goalCell  = { x:0, y:0 };
 let goalX = 0, goalY = 0;
 let startCell = { x:0, y:0 };
-let runwayDir = { x:0, y:1 };
+let goalWall  = null;         // [x1, y1, x2, y2]  glowing finish wall
 
 /* navigator (tweened angle) */
 let navAngle       = 0;
@@ -159,12 +161,10 @@ let lookX = 0, lookY = 0;
 
 const cam = { x:0, y:0 };
 
-let steerTarget = 0;
-
 /* ============================================================= */
-/*  INPUT                                                        */
+/*  INPUT  (instant 90° turns)                                   */
 /* ============================================================= */
-const keys = new Set();
+const keys     = new Set();
 const pointers = new Map();
 
 const KEYMAP = {
@@ -172,27 +172,29 @@ const KEYMAP = {
   a:'left', d:'right', A:'left', D:'right'
 };
 
-function computeSteerTarget(){
-  let t = 0;
-  if(keys.has('left'))  t -= 1;
-  if(keys.has('right')) t += 1;
-  pointers.forEach(function(side){ t += side; });
-  steerTarget = t < -1 ? -1 : (t > 1 ? 1 : t);
+function turnLeft(){
+  player.dir = (player.dir + 3) & 3;
+  player.ang = DIR_ANG[player.dir];
+}
+function turnRight(){
+  player.dir = (player.dir + 1) & 3;
+  player.ang = DIR_ANG[player.dir];
 }
 
 addEventListener('keydown', function(e){
   const k = KEYMAP[e.key];
   if(!k) return;
   e.preventDefault();
+  if(keys.has(k)) return;
   keys.add(k);
-  computeSteerTarget();
+  if(k === 'left')  turnLeft();
+  else              turnRight();
 });
 addEventListener('keyup', function(e){
   const k = KEYMAP[e.key];
   if(!k) return;
   e.preventDefault();
   keys.delete(k);
-  computeSteerTarget();
 });
 
 cv.addEventListener('contextmenu', function(e){ e.preventDefault(); });
@@ -200,8 +202,8 @@ cv.addEventListener('contextmenu', function(e){ e.preventDefault(); });
 cv.addEventListener('pointerdown', function(e){
   e.preventDefault();
   const side = e.clientX < CW * 0.5 ? -1 : 1;
+  if(side === -1) turnLeft(); else turnRight();
   pointers.set(e.pointerId, side);
-  computeSteerTarget();
   try { cv.setPointerCapture(e.pointerId); } catch(_){}
 });
 
@@ -211,14 +213,13 @@ cv.addEventListener('pointermove', function(e){
   const side = e.clientX < CW * 0.5 ? -1 : 1;
   if(pointers.get(e.pointerId) !== side){
     pointers.set(e.pointerId, side);
-    computeSteerTarget();
+    if(side === -1) turnLeft(); else turnRight();
   }
 });
 
 function endPointer(e){
   if(!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
-  computeSteerTarget();
 }
 cv.addEventListener('pointerup',     endPointer);
 cv.addEventListener('pointercancel', endPointer);
@@ -226,10 +227,7 @@ cv.addEventListener('pointerleave',  endPointer);
 
 /* ============================================================= */
 /*  CORRIDOR PATH GENERATION                                     */
-/*  Non-touching self-avoiding random walk:                       */
-/*  new cell must have no visited cardinal neighbours             */
-/*  (other than the cell we came from), so the corridor never     */
-/*  merges with itself.                                           */
+/*  Self-avoiding walk with no-touch rule (corridor never joins) */
 /* ============================================================= */
 function attemptWalk(targetLen, N){
   const visited = new Set();
@@ -258,7 +256,6 @@ function attemptWalk(targetLen, N){
       if(nx < 0 || nx >= N || ny < 0 || ny >= N) continue;
       if(visited.has(ny * N + nx)) continue;
 
-      // check the 4-neighbours of the candidate (excluding the one we came from)
       let ok = true;
       for(let e = 0; e < 4; e++){
         const ax = nx + dirs[e][0];
@@ -299,13 +296,13 @@ function buildLevel(){
   const level = G.level;
 
   const targetLen = 12 + (level - 1) * 5;
-  const N = Math.ceil(Math.sqrt(targetLen) * 2.2) + 4;
+  const N = Math.max(10, Math.ceil(Math.sqrt(targetLen) * 3.5)) + 4;
 
   W = N; H = N;
   s = 200;
   G.maxSpeed = Math.round((132 + level * 7) * 1.5);
 
-  path = generateCorridor(targetLen, N, 200);
+  path = generateCorridor(targetLen, N, 300);
   if(path.length < 4){
     path = [[0,0],[1,0],[2,0],[3,0],[4,0]];
   }
@@ -317,20 +314,16 @@ function buildLevel(){
 
   startCell = { x: path[0][0], y: path[0][1] };
   goalCell  = { x: path[path.length-1][0], y: path[path.length-1][1] };
-  runwayDir = {
-    x: path[1][0] - path[0][0],
-    y: path[1][1] - path[0][1]
-  };
 
   goalX = (goalCell.x + 0.5) * s;
   goalY = (goalCell.y + 0.5) * s;
 
-  /* ---- walls: all 4 sides of every path cell, minus the openings ---- */
+  /* ---- walls: 4 sides of each path cell minus the openings ---- */
   segs = [];
   for(let i = 0; i < path.length; i++){
     const cx = path[i][0], cy = path[i][1];
-    const prev = i > 0              ? path[i-1] : null;
-    const next = i < path.length-1  ? path[i+1] : null;
+    const prev = i > 0             ? path[i-1] : null;
+    const next = i < path.length-1 ? path[i+1] : null;
 
     const X = cx * s, Y = cy * s;
 
@@ -351,13 +344,31 @@ function buildLevel(){
 
   buildBuckets();
 
-  /* ---- player ---- */
+  /* ---- start direction ---- */
+  const rdx = path[1][0] - path[0][0];
+  const rdy = path[1][1] - path[0][1];
+  if(rdx === 1)       player.dir = 0;
+  else if(rdx === -1) player.dir = 2;
+  else if(rdy === 1)  player.dir = 1;
+  else                player.dir = 3;
+  player.ang = DIR_ANG[player.dir];
+  visAng     = player.ang;
+
   player.x = (startCell.x + 0.5) * s;
   player.y = (startCell.y + 0.5) * s;
-  player.ang = Math.atan2(runwayDir.y, runwayDir.x);
-  player.vx = Math.cos(player.ang) * G.maxSpeed;
-  player.vy = Math.sin(player.ang) * G.maxSpeed;
-  angVel = 0;
+
+  /* ---- goal wall (glowing finish) ---- */
+  {
+    const last = path[path.length - 1];
+    const prev = path[path.length - 2];
+    const dx = last[0] - prev[0];
+    const dy = last[1] - prev[1];
+    const LX = last[0] * s, LY = last[1] * s;
+    if(dx === 1)       goalWall = [LX + s, LY,     LX + s, LY + s];
+    else if(dx === -1) goalWall = [LX,     LY,     LX,     LY + s];
+    else if(dy === 1)  goalWall = [LX,     LY + s, LX + s, LY + s];
+    else               goalWall = [LX,     LY,     LX + s, LY    ];
+  }
 
   trail = [{ x: player.x, y: player.y }];
   lookX = player.x;
@@ -366,12 +377,10 @@ function buildLevel(){
   cam.x = player.x - CW / 2;
   cam.y = player.y - CH / 2;
 
-  /* ---- navigator ---- */
   navCell.x = -1; navCell.y = -1;
-  navAngle = Math.atan2(runwayDir.y, runwayDir.x);
+  navAngle = player.ang;
   navAngleTarget = navAngle;
 
-  steerTarget = 0;
   keys.clear(); pointers.clear();
 
   G.levelTime = 0;
@@ -380,8 +389,6 @@ function buildLevel(){
   G.timer     = 0;
   G.white     = 0;
   G.shake     = 0;
-
-  computeSteerTarget();
 }
 
 /* ------------------------------------------------------------- */
@@ -450,7 +457,7 @@ function hitsWall(px, py){
 }
 
 /* ============================================================= */
-/*  NAVIGATOR (path-based)                                       */
+/*  NAVIGATOR (path-based, one tile ahead)                       */
 /* ============================================================= */
 function updateNavigator(){
   const pcx = Math.floor(player.x / s);
@@ -459,21 +466,18 @@ function updateNavigator(){
   navCell.x = pcx; navCell.y = pcy;
 
   const idx = pathIdxMap.get(pcy * W + pcx);
-  if(idx === undefined) return;  // off-path (shouldn't happen)
+  if(idx === undefined) return;
 
   const L = path.length;
 
   let fromIdx, toIdx;
   if(idx + 2 <= L - 1){
-    // look one tile into the future
     fromIdx = idx + 1;
     toIdx   = idx + 2;
   } else if(idx + 1 <= L - 1){
-    // about to reach the goal, point at the goal
     fromIdx = idx;
     toIdx   = idx + 1;
   } else {
-    // at the goal, hold current angle
     return;
   }
 
@@ -513,10 +517,15 @@ function win(){
 function resetLevel(){
   player.x = (startCell.x + 0.5) * s;
   player.y = (startCell.y + 0.5) * s;
-  player.ang = Math.atan2(runwayDir.y, runwayDir.x);
-  player.vx = Math.cos(player.ang) * G.maxSpeed;
-  player.vy = Math.sin(player.ang) * G.maxSpeed;
-  angVel = 0;
+
+  const rdx = path[1][0] - path[0][0];
+  const rdy = path[1][1] - path[0][1];
+  if(rdx === 1)       player.dir = 0;
+  else if(rdx === -1) player.dir = 2;
+  else if(rdy === 1)  player.dir = 1;
+  else                player.dir = 3;
+  player.ang = DIR_ANG[player.dir];
+  visAng     = player.ang;
 
   trail = [{ x: player.x, y: player.y }];
   lookX = player.x;
@@ -526,7 +535,7 @@ function resetLevel(){
   cam.y = player.y - CH / 2;
 
   navCell.x = -1; navCell.y = -1;
-  navAngle = Math.atan2(runwayDir.y, runwayDir.x);
+  navAngle = player.ang;
   navAngleTarget = navAngle;
 
   G.levelTime = 0;
@@ -538,45 +547,42 @@ function resetLevel(){
 /* ============================================================= */
 /*  UPDATE                                                       */
 /* ============================================================= */
-const TURN      = 4.4;
-const TURN_EASE = 30;
-
-/* how many cells ahead the camera looks */
 const CAM_LOOKAHEAD_CELLS = 1;
-const CAM_LOOKAHEAD_MIX   = 0.42;
+const CAM_LOOKAHEAD_MIX   = 0.40;
 
 function update(dt){
   if(G.shake > 0) G.shake = Math.max(0, G.shake - dt * 42);
 
-  /* tween navigator angle (always, regardless of state) */
-  let ndiff = navAngleTarget - navAngle;
-  while(ndiff >  Math.PI) ndiff -= Math.PI * 2;
-  while(ndiff < -Math.PI) ndiff += Math.PI * 2;
-  navAngle += ndiff * (1 - Math.exp(-12 * dt));
+  /* tween navigator angle (shortest path) */
+  {
+    let ndiff = navAngleTarget - navAngle;
+    while(ndiff >  Math.PI) ndiff -= Math.PI * 2;
+    while(ndiff < -Math.PI) ndiff += Math.PI * 2;
+    navAngle += ndiff * (1 - Math.exp(-14 * dt));
+  }
+
+  /* tween visual player angle toward physical angle (smooth snap) */
+  {
+    let adiff = player.ang - visAng;
+    while(adiff >  Math.PI) adiff -= Math.PI * 2;
+    while(adiff < -Math.PI) adiff += Math.PI * 2;
+    visAng += adiff * (1 - Math.exp(-26 * dt));
+  }
 
   if(G.state === 'play'){
     if(G.delay > 0){
       G.delay -= dt;
-      angVel += (0 - angVel) * (1 - Math.exp(-TURN_EASE * dt));
       return;
     }
 
     G.levelTime += dt;
 
-    /* ---- steering: instant input, eased angular velocity ---- */
-    const targetAngVel = steerTarget * TURN;
-    angVel += (targetAngVel - angVel) * (1 - Math.exp(-TURN_EASE * dt));
-    player.ang += angVel * dt;
+    /* ---- instant direction, move straight ---- */
+    const dirv = DIR_VEC[player.dir];
+    const dx   = dirv[0] * G.maxSpeed * dt;
+    const dy   = dirv[1] * G.maxSpeed * dt;
 
-    /* ---- no momentum: velocity follows facing ---- */
-    const cos = Math.cos(player.ang);
-    const sin = Math.sin(player.ang);
-    player.vx = cos * G.maxSpeed;
-    player.vy = sin * G.maxSpeed;
-
-    const dx = player.vx * dt;
-    const dy = player.vy * dt;
-    const dist = Math.hypot(dx, dy);
+    const dist  = Math.abs(dx) + Math.abs(dy);
     const steps = Math.max(1, Math.ceil(dist / 3));
 
     for(let i = 0; i < steps; i++){
@@ -596,7 +602,7 @@ function update(dt){
 
     updateNavigator();
 
-    /* ---- camera lookahead along the path ---- */
+    /* ---- camera lookahead along path ---- */
     const pcx = Math.floor(player.x / s);
     const pcy = Math.floor(player.y / s);
     const idx = pathIdxMap.get(pcy * W + pcx);
@@ -613,13 +619,12 @@ function update(dt){
     const camOffY = (lookY - player.y) * CAM_LOOKAHEAD_MIX;
     const camTargetX = player.x + camOffX - CW / 2;
     const camTargetY = player.y + camOffY - CH / 2;
-    const ck = 1 - Math.exp(-8 * dt);
+    const ck = 1 - Math.exp(-7 * dt);
     cam.x += (camTargetX - cam.x) * ck;
     cam.y += (camTargetY - cam.y) * ck;
 
-    /* ---- goal ---- */
-    const gr = Math.max(8, s * 0.055);
-    if(Math.hypot(player.x - goalX, player.y - goalY) < gr){
+    /* ---- goal (enter the goal cell) ---- */
+    if(pcx === goalCell.x && pcy === goalCell.y){
       win();
       return;
     }
@@ -666,28 +671,7 @@ function render(){
   ctx.lineCap  = 'round';
   ctx.lineJoin = 'round';
 
-  /* ---------------- goal ---------------- */
-  const pulse = 0.5 + 0.5 * Math.sin(G.levelTime * 6.0);
-  const gsz = 8 + pulse * 3.5;
-
-  ctx.save();
-  ctx.translate(goalX - camX, goalY - camY);
-  ctx.rotate(G.levelTime * 1.1);
-  ctx.shadowColor = wallBright;
-  ctx.shadowBlur  = 18;
-  ctx.strokeStyle = wallBright;
-  ctx.lineWidth   = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, -gsz);
-  ctx.lineTo(gsz, 0);
-  ctx.lineTo(0, gsz);
-  ctx.lineTo(-gsz, 0);
-  ctx.closePath();
-  ctx.stroke();
-  ctx.restore();
-  ctx.shadowBlur = 0;
-
-  /* ---------------- walls (square segments) ---------------- */
+  /* ---------------- walls ---------------- */
   const wp = new Path2D();
   let visible = 0;
 
@@ -715,7 +699,31 @@ function render(){
     ctx.stroke(wp);
   }
 
-  /* ---------------- trail ---------------- */
+  /* ---------------- glowing finish wall ---------------- */
+  if(goalWall){
+    const pulse = 0.55 + 0.45 * Math.sin(G.levelTime * 4);
+    ctx.save();
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur  = 18 + pulse * 16;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth   = 4;
+    ctx.lineCap     = 'round';
+    ctx.beginPath();
+    ctx.moveTo(goalWall[0] - camX, goalWall[1] - camY);
+    ctx.lineTo(goalWall[2] - camX, goalWall[3] - camY);
+    ctx.stroke();
+
+    ctx.shadowBlur  = 34 + pulse * 22;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.moveTo(goalWall[0] - camX, goalWall[1] - camY);
+    ctx.lineTo(goalWall[2] - camX, goalWall[3] - camY);
+    ctx.stroke();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- trail (white) ---------------- */
   if(trail.length > 1){
     ctx.beginPath();
     ctx.moveTo(trail[0].x - camX, trail[0].y - camY);
@@ -724,30 +732,30 @@ function render(){
     }
     ctx.lineTo(player.x - camX, player.y - camY);
 
-    ctx.lineWidth   = 1;
-    ctx.strokeStyle = accentSoft;
-    ctx.globalAlpha = 0.9;
+    ctx.lineWidth   = 1.4;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
     ctx.stroke();
-    ctx.globalAlpha = 1;
   }
 
-  /* ---------------- player ---------------- */
+  /* ---------------- player (white, smaller) ---------------- */
   const px = player.x - camX;
   const py = player.y - camY;
 
   ctx.save();
   ctx.translate(px, py);
-  ctx.rotate(player.ang);
+  ctx.rotate(visAng);
 
-  ctx.shadowColor = accent;
-  ctx.shadowBlur  = 10;
-  ctx.fillStyle   = accent;
+  ctx.shadowColor = '#ffffff';
+  ctx.shadowBlur  = 8;
+  ctx.fillStyle   = '#ffffff';
 
   ctx.beginPath();
-  ctx.moveTo( 7.0,  0);
-  ctx.lineTo(-4.8, -4.5);
-  ctx.lineTo(-2.2,  0);
-  ctx.lineTo(-4.8,  4.5);
+  ctx.moveTo( 5.0,  0);
+  ctx.lineTo(-3.4, -3.2);
+  ctx.lineTo(-1.6,  0);
+  ctx.lineTo(-3.4,  3.2);
   ctx.closePath();
   ctx.fill();
   ctx.restore();
@@ -764,31 +772,11 @@ function render(){
 }
 
 /* ------------------------------------------------------------- */
-/*  navigator arrow (uses tweened navAngle)                      */
+/*  navigator arrow (no ring)                                    */
 /* ------------------------------------------------------------- */
 function renderNavigator(){
   const cx = CW - 48;
   const cy = 48;
-  const R  = 17;
-
-  ctx.beginPath();
-  ctx.arc(cx, cy, R + 13, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.30)';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
-  ctx.lineWidth = 1.5;
-  for(let i = 0; i < 4; i++){
-    const a = i * Math.PI / 2;
-    const c = Math.cos(a), sn = Math.sin(a);
-    ctx.beginPath();
-    ctx.moveTo(cx + c * (R + 3), cy + sn * (R + 3));
-    ctx.lineTo(cx + c * (R + 8), cy + sn * (R + 8));
-    ctx.stroke();
-  }
 
   ctx.save();
   ctx.translate(cx, cy);
