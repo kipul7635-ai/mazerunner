@@ -31,6 +31,7 @@
   }
   #hud b { font-weight: normal; letter-spacing: 2px; }
 
+  /* ---- combo counter (top left, under LEVEL) ---- */
   #combo {
     position: fixed; top: 44px; left: 16px;
     font-size: 13px; letter-spacing: 2px;
@@ -74,6 +75,7 @@
     color: #ff5566;
   }
 
+  /* ---- t-minus depletion bar (below the timers) ---- */
   #tbar {
     position: fixed;
     top: 37px;
@@ -114,6 +116,7 @@
     transition: color .5s, opacity .5s;
   }
 
+  /* ---- buttons ---- */
   #btnWrap {
     position: fixed; left: 50%; top: 56%;
     transform: translate(-50%,-50%);
@@ -203,6 +206,7 @@ const hintEl  = document.getElementById('hint');
 const btnEl   = document.getElementById('btn');
 const btn2El  = document.getElementById('btn2');
 
+/* offscreen render target (used for the globe warp) */
 const off  = document.createElement('canvas');
 const octx = off.getContext('2d');
 
@@ -238,209 +242,11 @@ function applyTheme(){
   const b = hudEl.querySelector('b');
   if(b) b.style.color = accent;
 }
+
 function pickColors(){
   hue = Math.floor(Math.random() * 360);
   applyTheme();
 }
-
-/* ============================================================= */
-/*  AUDIO  —  8 layered loops, all synced to the same start time */
-/*  Layers join as combo grows:                                  */
-/*    pads(0-4) > drums(5) > kick(10) > bass(15) >               */
-/*    percs(20) > noise(25) > lead(30) > leads(35+)              */
-/*  All buffers play looping from the start; only their gains    */
-/*  and (for pads) the lowpass cutoff change with combo.         */
-/* ============================================================= */
-const AUDIO_FILES = {
-  PADS:  'PADS.ogg',
-  DRUMS: 'DRUMS.ogg',
-  KICK:  'KICK.ogg',
-  BASS:  'BASS.ogg',
-  PERCS: 'PERCS.ogg',
-  NOISE: 'NOISE.ogg',
-  LEAD:  'LEAD.ogg',
-  LEADS: 'LEADS.ogg'
-};
-
-/* order in which layers join as combo grows */
-const LAYER_ORDER = ['PADS','DRUMS','KICK','BASS','PERCS','NOISE','LEAD','LEADS'];
-
-/* combo threshold at which each layer becomes active */
-const LAYER_THRESHOLD = {
-  PADS:  0,
-  DRUMS: 5,
-  KICK:  10,
-  BASS:  15,
-  PERCS: 20,
-  NOISE: 25,
-  LEAD:  30,
-  LEADS: 35
-};
-
-/* full-on gain for each non-pads layer when active */
-const LAYER_ACTIVE_GAIN = {
-  DRUMS: 0.75,
-  KICK:  0.85,
-  BASS:  0.70,
-  PERCS: 0.60,
-  NOISE: 0.40,
-  LEAD:  0.60,
-  LEADS: 0.55
-};
-
-/* pads tiers: gain + lowpass cutoff at combo 0..4 */
-const PAD_TIERS = [
-  { gain: 0.14, cutoff: 380   },
-  { gain: 0.22, cutoff: 1100  },
-  { gain: 0.34, cutoff: 2800  },
-  { gain: 0.50, cutoff: 6500  },
-  { gain: 0.70, cutoff: 18000 }
-];
-
-const AUDIO_FADE = 0.9;   /* seconds to fade in / out a layer */
-
-const audio = {
-  ctx: null,
-  master: null,
-  buffers: {},
-  ready: false,
-  started: false,
-  nodes: {}
-};
-
-function ensureAudioContext(){
-  if(audio.ctx) return audio.ctx;
-  try {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if(!AC) return null;
-    audio.ctx = new AC();
-  } catch(e){ audio.ctx = null; }
-  return audio.ctx;
-}
-
-async function loadAudioBuffers(){
-  if(audio.ready) return;
-  const ac = audio.ctx;
-  if(!ac) return;
-
-  const names = Object.keys(AUDIO_FILES);
-  await Promise.all(names.map(function(name){
-    const url = AUDIO_FILES[name];
-    return fetch(url)
-      .then(function(r){ if(!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
-      .then(function(ab){
-        return new Promise(function(res, rej){
-          ac.decodeAudioData(ab, function(buf){ audio.buffers[name] = buf; res(); }, rej);
-        });
-      })
-      .catch(function(err){
-        /* layer missing — silently skip */
-        console.warn('[audio] could not load', url, err && err.message ? err.message : err);
-      });
-  }));
-  audio.ready = true;
-}
-
-function startAudioLayers(){
-  if(audio.started) return;
-  const ac = audio.ctx;
-  if(!ac) return;
-
-  /* shared start time — every loop begins at exactly the same instant
-     so all layers stay sample-locked regardless of when they fade in */
-  const startTime = ac.currentTime + 0.12;
-
-  audio.master = ac.createGain();
-  audio.master.gain.value = 0.9;
-  audio.master.connect(ac.destination);
-
-  for(let i = 0; i < LAYER_ORDER.length; i++){
-    const name = LAYER_ORDER[i];
-    const buf  = audio.buffers[name];
-    if(!buf) continue;   /* missing file — skip gracefully */
-
-    const src = ac.createBufferSource();
-    src.buffer = buf;
-    src.loop   = true;
-
-    const gain = ac.createGain();
-    gain.gain.value = (name === 'PADS') ? PAD_TIERS[0].gain : 0;
-
-    if(name === 'PADS'){
-      const filter = ac.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.value = PAD_TIERS[0].cutoff;
-      filter.Q.value = 0.7;
-      src.connect(filter);
-      filter.connect(gain);
-      audio.nodes[name] = { src: src, gain: gain, filter: filter };
-    } else {
-      src.connect(gain);
-      audio.nodes[name] = { src: src, gain: gain, filter: null };
-    }
-
-    gain.connect(audio.master);
-    src.start(startTime);
-  }
-
-  audio.started = true;
-  applyAudioForCombo(G.combo, true);
-}
-
-/* Target gains/cutoffs for the current combo */
-function applyAudioForCombo(combo, immediate){
-  const ac = audio.ctx;
-  if(!ac || !audio.started) return;
-
-  const now = ac.currentTime;
-  const tau = immediate ? 0.001 : (AUDIO_FADE / 3);
-
-  for(let i = 0; i < LAYER_ORDER.length; i++){
-    const name = LAYER_ORDER[i];
-    const node = audio.nodes[name];
-    if(!node) continue;
-
-    if(name === 'PADS'){
-      const tier = Math.max(0, Math.min(PAD_TIERS.length - 1, combo));
-      const tgt  = PAD_TIERS[tier];
-
-      node.gain.gain.cancelScheduledValues(now);
-      node.gain.gain.setTargetAtTime(tgt.gain, now, tau);
-
-      node.filter.frequency.cancelScheduledValues(now);
-      node.filter.frequency.setTargetAtTime(tgt.cutoff, now, tau);
-    } else {
-      const active = combo >= LAYER_THRESHOLD[name];
-      const target = active ? (LAYER_ACTIVE_GAIN[name] || 0.6) : 0;
-
-      node.gain.gain.cancelScheduledValues(now);
-      node.gain.gain.setTargetAtTime(target, now, tau);
-    }
-  }
-}
-
-let audioInitPromise = null;
-function initAudio(){
-  if(audioInitPromise) return audioInitPromise;
-  audioInitPromise = (async function(){
-    const ac = ensureAudioContext();
-    if(!ac) return;
-    if(ac.state === 'suspended'){
-      try { await ac.resume(); } catch(e){}
-    }
-    await loadAudioBuffers();
-    if(!audio.started) startAudioLayers();
-    applyAudioForCombo(G.combo, false);
-  })();
-  return audioInitPromise;
-}
-
-/* resume when tab becomes visible again */
-document.addEventListener('visibilitychange', function(){
-  if(!document.hidden && audio.ctx && audio.ctx.state === 'suspended'){
-    audio.ctx.resume().catch(function(){});
-  }
-});
 
 /* ============================================================= */
 /*  GLOBE WARP                                                   */
@@ -508,6 +314,9 @@ function warpBlit(){
   }
 }
 
+/* ============================================================= */
+/*  RESIZE                                                       */
+/* ============================================================= */
 function resize(){
   CW = cv.width  = window.innerWidth;
   CH = cv.height = window.innerHeight;
@@ -518,11 +327,181 @@ function resize(){
 addEventListener('resize', resize);
 
 /* ============================================================= */
+/*  AUDIO  —  layered stems, synced, combo-driven                */
+/* ============================================================= */
+const AUDIO_BASE = '';        /* e.g. 'audio/' if the stems live in a subfolder */
+const COMBO_STRETCH = 1.3;    /* thresholds are 30% longer                     */
+
+/*  Join order and fade windows.  All numbers are "raw" combo values;
+    they are multiplied by COMBO_STRETCH when compared to the live combo. */
+const LAYER_DEFS = [
+  { key:'pads',  file:'PADS.ogg',  joinAt: 0,  fullAt: 4,  minGain:0.045, maxGain:0.40, minCut: 420,  maxCut: 15000 },
+  { key:'drums', file:'DRUMS.ogg', joinAt: 5,  fullAt: 10, minGain:0,     maxGain:0.55, minCut: 700,  maxCut: 18000 },
+  { key:'kick',  file:'KICK.ogg',  joinAt: 10, fullAt: 15, minGain:0,     maxGain:0.62, minCut: 260,  maxCut: 14000 },
+  { key:'bass',  file:'BASS.ogg',  joinAt: 15, fullAt: 20, minGain:0,     maxGain:0.50, minCut: 170,  maxCut: 10000 },
+  { key:'percs', file:'PERCS.ogg', joinAt: 20, fullAt: 25, minGain:0,     maxGain:0.34, minCut: 900,  maxCut: 18000 },
+  { key:'noise', file:'NOISE.ogg', joinAt: 25, fullAt: 30, minGain:0,     maxGain:0.22, minCut: 700,  maxCut: 18000 },
+  { key:'lead',  file:'LEAD.ogg',  joinAt: 30, fullAt: 35, minGain:0,     maxGain:0.34, minCut: 650,  maxCut: 18000 },
+  { key:'leads', file:'LEADS.ogg', joinAt: 35, fullAt: 40, minGain:0,     maxGain:0.34, minCut: 650,  maxCut: 18000 }
+];
+
+const AudioSys = {
+  ctx: null,
+  master: null,
+  buffers: Object.create(null),
+  layers: [],
+  loaded: false,
+  started: false,
+  failed: false,
+  _resumeHooked: false,
+
+  ensureCtx: function(){
+    if(this.ctx) return this.ctx;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC){ this.failed = true; return null; }
+    this.ctx = new AC();
+
+    /* master chain: gain -> compressor -> destination */
+    const comp = this.ctx.createDynamicsCompressor();
+    comp.threshold.value = -14;
+    comp.knee.value      = 12;
+    comp.ratio.value     = 4;
+    comp.attack.value    = 0.005;
+    comp.release.value   = 0.25;
+    comp.connect(this.ctx.destination);
+
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.72;
+    this.master.connect(comp);
+
+    /* safety: try to resume on any user gesture */
+    if(!this._resumeHooked){
+      this._resumeHooked = true;
+      const resume = () => {
+        if(this.ctx && this.ctx.state === 'suspended'){
+          this.ctx.resume().catch(()=>{});
+        }
+      };
+      ['pointerdown','keydown','touchstart'].forEach(ev =>
+        window.addEventListener(ev, resume, { passive: true })
+      );
+    }
+    return this.ctx;
+  },
+
+  preload: function(){
+    const self = this;
+    const c = this.ensureCtx();
+    if(!c) return Promise.resolve();
+
+    const jobs = LAYER_DEFS.map(function(def){
+      return fetch(AUDIO_BASE + def.file)
+        .then(function(res){
+          if(!res.ok) throw new Error('HTTP ' + res.status);
+          return res.arrayBuffer();
+        })
+        .then(function(ab){ return c.decodeAudioData(ab); })
+        .then(function(buf){ self.buffers[def.key] = buf; })
+        .catch(function(err){
+          console.warn('[PathRunner] could not load ' + def.file + ':', err);
+        });
+    });
+
+    return Promise.all(jobs).then(function(){ self.loaded = true; });
+  },
+
+  /* Start every stem at the exact same context time so they layer in sync.
+     They loop forever; we only ever change gain + filter after this.      */
+  start: function(){
+    if(this.started) return;
+    const c = this.ensureCtx();
+    if(!c) return;
+    if(c.state === 'suspended') c.resume().catch(()=>{});
+
+    const t0 = c.currentTime + 0.09;
+
+    for(let i = 0; i < LAYER_DEFS.length; i++){
+      const def = LAYER_DEFS[i];
+      const buf = this.buffers[def.key];
+      if(!buf) continue;
+
+      const src = c.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+
+      const filt = c.createBiquadFilter();
+      filt.type = 'lowpass';
+      filt.frequency.value = def.minCut;
+      filt.Q.value = 0.6;
+
+      const gain = c.createGain();
+      gain.gain.value = 0;
+
+      src.connect(filt);
+      filt.connect(gain);
+      gain.connect(this.master);
+
+      try { src.start(t0); } catch(e){ /* already started */ }
+
+      this.layers.push({ def: def, src: src, filt: filt, gain: gain });
+    }
+
+    this.started = true;
+    this.applyCombo(0, true);
+  },
+
+  /* Map combo -> per-layer gain + lowpass cutoff.
+     combo <= joinAt  : layer at its "quiet + muffled" state (0 for non-pads)
+     combo >= fullAt  : layer at its full clear state
+     in between       : smooth fade                                              */
+  applyCombo: function(combo, instant){
+    if(!this.started || !this.ctx || !this.layers.length) return;
+    const now = this.ctx.currentTime;
+    const tc  = instant ? 0.015 : 0.55;
+
+    for(let i = 0; i < this.layers.length; i++){
+      const L = this.layers[i];
+      const d = L.def;
+
+      const j = d.joinAt * COMBO_STRETCH;
+      const f = d.fullAt * COMBO_STRETCH;
+
+      let t;
+      if(combo <= j)      t = 0;
+      else if(combo >= f) t = 1;
+      else                t = (combo - j) / (f - j);
+
+      /* smoothstep for a musical fade */
+      t = t * t * (3 - 2 * t);
+
+      const g = d.minGain + (d.maxGain - d.minGain) * t;
+      const cut = d.minCut * Math.pow(d.maxCut / d.minCut, t);
+
+      try {
+        L.gain.gain.cancelScheduledValues(now);
+        L.gain.gain.setTargetAtTime(g, now, tc);
+
+        L.filt.frequency.cancelScheduledValues(now);
+        L.filt.frequency.setTargetAtTime(cut, now, tc);
+      } catch(e){}
+    }
+  },
+
+  /* Fade everything down quickly (used when returning to the menu, etc.) */
+  duck: function(amount, seconds){
+    if(!this.ctx || !this.master) return;
+    const now = this.ctx.currentTime;
+    this.master.gain.cancelScheduledValues(now);
+    this.master.gain.setTargetAtTime(amount, now, seconds * 0.5);
+  }
+};
+
+/* ============================================================= */
 /*  STATE                                                        */
 /* ============================================================= */
 const G = {
   level: 1,
-  state: 'menu',
+  state: 'menu',      /* 'menu' | 'play' | 'dead' | 'win' */
   levelTime: 0,
   parTime: 10,
   shake: 0,
@@ -566,7 +545,7 @@ let navCell        = { x:-1, y:-1 };
 const cam = { x:0, y:0 };
 
 /* ============================================================= */
-/*  STARFIELD  (outside the maze only)                           */
+/*  STARFIELD  —  only in the void outside the maze              */
 /* ============================================================= */
 let stars = [];
 
@@ -575,6 +554,7 @@ function generateStars(){
 
   const mazeW = W * s;
   const mazeH = H * s;
+
   const MARGIN = Math.max(2800, mazeW * 0.55);
 
   const minX = -MARGIN;
@@ -597,7 +577,6 @@ function generateStars(){
     const x = minX + Math.random() * (maxX - minX);
     const y = minY + Math.random() * (maxY - minY);
 
-    /* never inside the maze footprint */
     if(x >= 0 && x <= mazeW && y >= 0 && y <= mazeH) continue;
 
     const size  = 0.6 + Math.random() * 2.0;
@@ -658,11 +637,9 @@ btnEl.addEventListener('click', function(e){
   e.stopPropagation();
   const a = primaryAction;
   hideAllButtons();
-
-  /* any primary button click is a valid user gesture for audio */
-  initAudio();
-
   if(a === 'start'){
+    AudioSys.start();
+    AudioSys.applyCombo(G.combo);
     G.state = 'play';
     G.levelTime = 0;
     resetTimerCache();
@@ -1068,7 +1045,8 @@ function breakCombo(){
   const had = G.combo > 0;
   G.combo = 0;
   refreshCombo(false);
-  applyAudioForCombo(0, false);   /* instruments return to their base state */
+  /* every instrument snaps back to its original quiet/muffled state */
+  AudioSys.applyCombo(0);
   return had;
 }
 
@@ -1099,7 +1077,8 @@ function win(){
   if(!G.comboBroken && G.levelTime <= G.parTime){
     G.combo++;
     refreshCombo(true);
-    applyAudioForCombo(G.combo, false);   /* unlock the next layer(s) */
+    /* push the new combo into the audio layers */
+    AudioSys.applyCombo(G.combo);
   }
 
   showPrimary('CONTINUE', 'continue');
@@ -1148,7 +1127,6 @@ function goToMenu(){
   G.level = 1;
   G.combo = 0;
   refreshCombo(false);
-  applyAudioForCombo(0, false);
   hideAllButtons();
   buildLevel();
   G.state = 'menu';
@@ -1156,6 +1134,8 @@ function goToMenu(){
   resetTimerCache();
   showPrimary('START', 'start');
   hideSecondary();
+  /* combo reset -> instruments back to the quiet/muffled pads layer */
+  AudioSys.applyCombo(0);
 }
 
 /* ============================================================= */
@@ -1289,6 +1269,7 @@ function render(){
   r.lineCap  = 'round';
   r.lineJoin = 'round';
 
+  /* stars */
   {
     const speed  = G.maxSpeed * (G.boosting ? currentBoostMult() : 1);
     const dirv   = DIR_VEC[player.dir];
@@ -1315,6 +1296,7 @@ function render(){
     }
   }
 
+  /* walls */
   const wp = new Path2D();
   let visible = 0;
 
@@ -1342,6 +1324,7 @@ function render(){
     r.stroke(wp);
   }
 
+  /* finish wall */
   if(goalWall){
     const pulse = 0.55 + 0.45 * Math.sin(G.levelTime * 4);
     r.save();
@@ -1365,6 +1348,7 @@ function render(){
     r.globalAlpha = 1;
   }
 
+  /* trail */
   if(trail.length > 1){
     r.beginPath();
     r.moveTo(trail[0].x - camX, trail[0].y - camY);
@@ -1386,6 +1370,7 @@ function render(){
     r.stroke();
   }
 
+  /* shockwaves */
   for(let i = 0; i < shockwaves.length; i++){
     const sw = shockwaves[i];
     const p  = sw.t / sw.dur;
@@ -1415,6 +1400,7 @@ function render(){
     r.restore();
   }
 
+  /* player */
   const px = player.x - camX;
   const py = player.y - camY;
 
@@ -1440,6 +1426,7 @@ function render(){
   r.fill();
   r.restore();
 
+  /* warp to display canvas */
   ctx.fillStyle = bgBase;
   ctx.fillRect(0, 0, CW, CH);
   warpBlit();
@@ -1561,14 +1548,11 @@ resetTimerCache();
 refreshCombo(false);
 showPrimary('START', 'start');
 hideSecondary();
-requestAnimationFrame(frame);
 
-/* Kick off context creation early (it stays suspended until a
-   real user gesture, but the buffers can be decoded in the meantime). */
-ensureAudioContext();
-if(audio.ctx){
-  loadAudioBuffers();
-}
+/* kick off audio loading in the background (non-blocking) */
+try { AudioSys.preload(); } catch(e){ console.warn(e); }
+
+requestAnimationFrame(frame);
 
 })();
 </script>
