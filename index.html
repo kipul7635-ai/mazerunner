@@ -351,6 +351,31 @@ let navCell        = { x:-1, y:-1 };
 const cam = { x:0, y:0 };
 
 /* ============================================================= */
+/*  STARFIELD (world‑space, stationary relative to maze)         */
+/* ============================================================= */
+let stars = [];
+
+function generateStars(){
+  stars = [];
+  const margin = 2000;
+  const minX = -margin;
+  const maxX = W * s + margin;
+  const minY = -margin;
+  const maxY = H * s + margin;
+  const area = (maxX - minX) * (maxY - minY);
+  const density = 1 / 90000;               // one star per 300×300
+  const count = Math.floor(area * density);
+
+  for(let i = 0; i < count; i++){
+    const x = minX + Math.random() * (maxX - minX);
+    const y = minY + Math.random() * (maxY - minY);
+    const size = 0.5 + Math.random() * 2.0;
+    const alpha = 0.2 + Math.random() * 0.6;
+    stars.push({ x, y, s: size, a: alpha });
+  }
+}
+
+/* ============================================================= */
 /*  BOOST + ACCELERATION RAMP                                    */
 /* ============================================================= */
 const BOOST_MULT_BASE    = 1.8;   /* starting multiplier            */
@@ -539,18 +564,20 @@ function buildLevel(){
 
   const level = G.level;
 
-  const targetLen = 12 + (level - 1) * 5;
+  /* ---- level length scaling: half as fast ---- */
+  const targetLen = Math.round(12 + (level - 1) * 2.5);
   const N = Math.max(10, Math.ceil(Math.sqrt(targetLen) * 3.5)) + 4;
 
   W = N; H = N;
 
-  /* ---- corridor narrows a little every level ---- */
-  s = Math.max(90, 200 * Math.pow(0.97, level - 1));
+  /* ---- corridor narrows a little every level (half rate) ---- */
+  s = Math.max(90, 200 * Math.pow(0.985, level - 1));
 
   wallGlowW = Math.max(5,   s * 0.05);
   wallCoreW = Math.max(1.2, s * 0.01);
 
-  G.maxSpeed = Math.round((132 + level * 7) * 1.5 * (s / 200));
+  /* ---- speed scaling: half as fast ---- */
+  G.maxSpeed = Math.round((132 + level * 3.5) * 1.5 * (s / 200));
 
   path = generateCorridor(targetLen, N, 300);
   if(path.length < 4){
@@ -568,13 +595,15 @@ function buildLevel(){
   goalX = (goalCell.x + 0.5) * s;
   goalY = (goalCell.y + 0.5) * s;
 
-  /* ---- PAR TIME (estimated time to beat the level) ----
-     Base estimate is made 15% more generous.            */
+  /* ---- PAR TIME (15% more generous) ---- */
   {
     const cellTime = s / G.maxSpeed;
     const basePar  = path.length * cellTime * 0.62 + 0.6;
     G.parTime = basePar * 1.15;
   }
+
+  /* ---- stars (world‑space) ---- */
+  generateStars();
 
   /* ---- walls: 4 sides of each path cell minus the openings ---- */
   segs = [];
@@ -1005,6 +1034,33 @@ function render(){
 
   r.lineCap  = 'round';
   r.lineJoin = 'round';
+
+  /* ---------------- stars (world‑space, smearing) ---------------- */
+  {
+    const speed = G.maxSpeed * (G.boosting ? currentBoostMult() : 1);
+    const dirv = DIR_VEC[player.dir];
+    const smear = Math.min(60, speed * 0.08);
+    const useSmear = smear > 2;
+
+    for(let i = 0; i < stars.length; i++){
+      const st = stars[i];
+      const sx = st.x - camX;
+      const sy = st.y - camY;
+      if(sx < -smear - 10 || sx > CW + smear + 10 || sy < -smear - 10 || sy > CH + smear + 10) continue;
+
+      if(useSmear){
+        r.beginPath();
+        r.moveTo(sx, sy);
+        r.lineTo(sx - dirv[0] * smear, sy - dirv[1] * smear);
+        r.strokeStyle = 'rgba(255,255,255,' + (st.a * 0.8) + ')';
+        r.lineWidth = st.s;
+        r.stroke();
+      } else {
+        r.fillStyle = 'rgba(255,255,255,' + st.a + ')';
+        r.fillRect(sx - st.s/2, sy - st.s/2, st.s, st.s);
+      }
+    }
+  }
 
   /* ---------------- walls ---------------- */
   const wp = new Path2D();
