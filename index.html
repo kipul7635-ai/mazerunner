@@ -66,7 +66,7 @@
     outline: none;
     opacity: 0;
     pointer-events: none;
-    transition: opacity .18s, transform .18s, color .5s, box-shadow .18s;
+    transition: opacity .1s, transform .1s, color .5s, box-shadow .1s;
     -webkit-tap-highlight-color: transparent;
     touch-action: manipulation;
   }
@@ -86,7 +86,7 @@
 <div id="timer">00:000</div>
 <div id="msg"></div>
 <button id="btn" type="button"></button>
-<div id="hint">◀ tap left &nbsp;·&nbsp; tap right ▶</div>
+<div id="hint">◀ tap left &nbsp;·&nbsp; tap right ▶ &nbsp;·&nbsp; hold both = boost</div>
 <script>
 (function(){
 'use strict';
@@ -148,11 +148,10 @@ addEventListener('resize', resize);
 const G = {
   level: 1,
   state: 'play',
-  timer: 0,
-  delay: 0,
   levelTime: 0,
   shake: 0,
-  maxSpeed: 210
+  maxSpeed: 210,
+  boosting: false
 };
 
 /* Direction constants: 0=right, 1=down, 2=left, 3=up */
@@ -192,22 +191,27 @@ let navCell        = { x:-1, y:-1 };
 const cam = { x:0, y:0 };
 
 /* ============================================================= */
+/*  BOOST                                                        */
+/* ============================================================= */
+const BOOST_MULT         = 1.8;   // speed multiplier while boosting
+const BOOST_HOLD_REFRESH = 0.30;  // boost lingers this long after release
+let boostTime  = 0;
+let boostPrev  = false;
+let boostGlow  = 0;
+let shockwaves = [];
+
+/* ============================================================= */
 /*  BUTTON / ACTION                                              */
 /* ============================================================= */
 let btnAction = null;
-let btnTimer  = null;
 
-function showButton(label, action, delay){
-  clearTimeout(btnTimer);
+function showButton(label, action){
   btnAction = action;
-  btnTimer = setTimeout(function(){
-    btnEl.textContent = label;
-    btnEl.classList.add('on');
-  }, delay || 0);
+  btnEl.textContent = label;
+  btnEl.classList.add('on');
 }
 
 function hideButton(){
-  clearTimeout(btnTimer);
   btnAction = null;
   btnEl.classList.remove('on');
 }
@@ -456,12 +460,16 @@ function buildLevel(){
   navAngle = player.ang;
   navAngleTarget = navAngle;
 
+  shockwaves.length = 0;
+  boostTime = 0;
+  boostPrev = false;
+  boostGlow = 0;
+  G.boosting = false;
+
   keys.clear(); pointers.clear();
 
   G.levelTime = 0;
-  G.delay     = 0.40;
   G.state     = 'play';
-  G.timer     = 0;
   G.shake     = 0;
 }
 
@@ -588,19 +596,21 @@ function showMsg(text){
   msgEl.textContent = text;
   msgEl.classList.add('on');
   clearTimeout(msgTimeout);
-  msgTimeout = setTimeout(function(){ msgEl.classList.remove('on'); }, 650);
+  msgTimeout = setTimeout(function(){ msgEl.classList.remove('on'); }, 420);
 }
 
 function crash(){
   G.state = 'dead';
-  G.shake = 9;
+  G.boosting = false;
+  G.shake = 10;
   showMsg('CRASH');
-  showButton('restart', 'restart', 320);
+  showButton('restart', 'restart');
 }
 
 function win(){
   G.state = 'win';
-  showButton('continue', 'continue', 220);
+  G.boosting = false;
+  showButton('continue', 'continue');
 }
 
 function resetLevel(){
@@ -627,10 +637,14 @@ function resetLevel(){
   navAngle = player.ang;
   navAngleTarget = navAngle;
 
+  shockwaves.length = 0;
+  boostTime = 0;
+  boostPrev = false;
+  boostGlow = 0;
+  G.boosting = false;
+
   G.levelTime = 0;
-  G.delay     = 0.30;
   G.state     = 'play';
-  G.timer     = 0;
   G.shake     = 0;
 }
 
@@ -656,18 +670,55 @@ function update(dt){
     visAng += adiff * (1 - Math.exp(-26 * dt));
   }
 
-  if(G.state === 'play'){
-    if(G.delay > 0){
-      G.delay -= dt;
-      return;
-    }
+  /* ---------------- hold detection ---------------- */
+  let leftHeld  = keys.has('left');
+  let rightHeld = keys.has('right');
 
+  pointers.forEach(function(side){
+    if(side === -1) leftHeld = true;
+    else if(side === 1) rightHeld = true;
+  });
+
+  const bothHeld = leftHeld && rightHeld;
+
+  /* ---------------- boost + shockwave ---------------- */
+  if(bothHeld && G.state === 'play'){
+    if(!boostPrev){
+      /* rising edge -> trigger */
+      shockwaves.push({
+        x: player.x,
+        y: player.y,
+        t: 0,
+        dur: 0.42,
+        maxR: Math.max(60, s * 0.85)
+      });
+      G.shake = Math.max(G.shake, 4);
+      boostGlow = 1;
+    }
+    boostTime = BOOST_HOLD_REFRESH;
+  }
+  boostPrev = bothHeld;
+
+  if(boostTime > 0) boostTime -= dt;
+  if(boostGlow > 0) boostGlow = Math.max(0, boostGlow - dt * 2.4);
+
+  const boosting = boostTime > 0 && G.state === 'play';
+  G.boosting = boosting;
+
+  /* ---------------- shockwave update ---------------- */
+  for(let i = shockwaves.length - 1; i >= 0; i--){
+    shockwaves[i].t += dt;
+    if(shockwaves[i].t >= shockwaves[i].dur) shockwaves.splice(i, 1);
+  }
+
+  /* ---------------- movement ---------------- */
+  if(G.state === 'play'){
     G.levelTime += dt;
 
-    /* ---- instant direction, move straight ---- */
-    const dirv = DIR_VEC[player.dir];
-    const dx   = dirv[0] * G.maxSpeed * dt;
-    const dy   = dirv[1] * G.maxSpeed * dt;
+    const speed = G.maxSpeed * (boosting ? BOOST_MULT : 1);
+    const dirv  = DIR_VEC[player.dir];
+    const dx    = dirv[0] * speed * dt;
+    const dy    = dirv[1] * speed * dt;
 
     const dist  = Math.abs(dx) + Math.abs(dy);
     const steps = Math.max(1, Math.ceil(dist / 3));
@@ -778,7 +829,7 @@ function render(){
     ctx.globalAlpha = 1;
   }
 
-  /* ---------------- trail (white) ---------------- */
+  /* ---------------- trail ---------------- */
   if(trail.length > 1){
     ctx.beginPath();
     ctx.moveTo(trail[0].x - camX, trail[0].y - camY);
@@ -787,11 +838,46 @@ function render(){
     }
     ctx.lineTo(player.x - camX, player.y - camY);
 
-    ctx.lineWidth   = 1.4;
-    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    if(G.boosting){
+      ctx.lineWidth   = 2.0;
+      ctx.strokeStyle = 'hsla(' + hue + ',95%,72%,0.95)';
+    } else {
+      ctx.lineWidth   = 1.4;
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    }
     ctx.lineCap     = 'round';
     ctx.lineJoin    = 'round';
     ctx.stroke();
+  }
+
+  /* ---------------- shockwaves ---------------- */
+  for(let i = 0; i < shockwaves.length; i++){
+    const sw = shockwaves[i];
+    const p  = sw.t / sw.dur;
+    const e  = 1 - Math.pow(1 - p, 2);
+    const r  = sw.maxR * e;
+    const a  = 1 - p;
+
+    const sx = sw.x - camX;
+    const sy = sw.y - camY;
+
+    ctx.save();
+    ctx.shadowColor = accent;
+    ctx.shadowBlur  = 16;
+
+    ctx.strokeStyle = 'hsla(' + hue + ',95%,72%,' + (a * 0.9) + ')';
+    ctx.lineWidth   = 1 + 3.6 * (1 - p);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.globalAlpha = a * 0.45;
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r * 0.62, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
   }
 
   /* ---------------- player (white, smaller) ---------------- */
@@ -802,9 +888,14 @@ function render(){
   ctx.translate(px, py);
   ctx.rotate(visAng);
 
-  ctx.shadowColor = '#ffffff';
-  ctx.shadowBlur  = 8;
-  ctx.fillStyle   = '#ffffff';
+  if(boostGlow > 0.03){
+    ctx.shadowColor = accent;
+    ctx.shadowBlur  = 8 + boostGlow * 20;
+  } else {
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur  = 8;
+  }
+  ctx.fillStyle = '#ffffff';
 
   ctx.beginPath();
   ctx.moveTo( 5.0,  0);
