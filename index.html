@@ -99,6 +99,10 @@ const msgEl   = document.getElementById('msg');
 const hintEl  = document.getElementById('hint');
 const btnEl   = document.getElementById('btn');
 
+/* offscreen render target (used for the globe warp) */
+const off  = document.createElement('canvas');
+const octx = off.getContext('2d');
+
 let CW = 0, CH = 0;
 
 /* ============================================================= */
@@ -134,11 +138,81 @@ function pickColors(){
 }
 
 /* ============================================================= */
+/*  GLOBE WARP (precomputed per resize)                          */
+/* ============================================================= */
+const WARP_GRID = 24;
+const WARP_K    = 0.22;      /* curvature strength (0 = flat)   */
+let warpTable  = null;
+let warpCellW  = 0;
+let warpCellH  = 0;
+
+function buildWarpTable(){
+  const N = WARP_GRID;
+  const cellW = CW / N;
+  const cellH = CH / N;
+  const ccx = CW * 0.5;
+  const ccy = CH * 0.5;
+  const refD = Math.sqrt(ccx*ccx + ccy*ccy);
+
+  const arr = new Float32Array(N * N * 4);
+  let k = 0;
+  for(let j = 0; j < N; j++){
+    for(let i = 0; i < N; i++){
+      const scx = (i + 0.5) * cellW - ccx;
+      const scy = (j + 0.5) * cellH - ccy;
+      const d = Math.sqrt(scx*scx + scy*scy);
+
+      let sc;
+      if(d < 0.001) sc = 1;
+      else {
+        const t = d / refD;
+        sc = 1 - WARP_K * t * t;
+      }
+
+      const dcx = ccx + scx * sc;
+      const dcy = ccy + scy * sc;
+      const dw  = cellW * sc;
+      const dh  = cellH * sc;
+
+      /* slight overdraw hides tiny seams between cells */
+      arr[k++] = dcx - dw * 0.5 - 0.75;
+      arr[k++] = dcy - dh * 0.5 - 0.75;
+      arr[k++] = dw + 1.5;
+      arr[k++] = dh + 1.5;
+    }
+  }
+
+  warpTable = arr;
+  warpCellW = cellW;
+  warpCellH = cellH;
+}
+
+function warpBlit(){
+  const N  = WARP_GRID;
+  const cw = warpCellW;
+  const ch = warpCellH;
+  let k = 0;
+  for(let j = 0; j < N; j++){
+    const sy = j * ch;
+    for(let i = 0; i < N; i++){
+      const sx = i * cw;
+      ctx.drawImage(off,
+        sx, sy, cw, ch,
+        warpTable[k], warpTable[k+1], warpTable[k+2], warpTable[k+3]);
+      k += 4;
+    }
+  }
+}
+
+/* ============================================================= */
 /*  RESIZE                                                       */
 /* ============================================================= */
 function resize(){
   CW = cv.width  = window.innerWidth;
   CH = cv.height = window.innerHeight;
+  off.width  = CW;
+  off.height = CH;
+  buildWarpTable();
 }
 addEventListener('resize', resize);
 
@@ -690,9 +764,9 @@ function update(dt){
         y: player.y,
         t: 0,
         dur: 0.42,
-        maxR: Math.max(60, s * 0.85)
+        maxR: Math.max(30, s * 0.42)
       });
-      G.shake = Math.max(G.shake, 4);
+      G.shake = Math.max(G.shake, 3);
       boostGlow = 1;
     }
     boostTime = BOOST_HOLD_REFRESH;
@@ -756,11 +830,13 @@ function update(dt){
 }
 
 /* ============================================================= */
-/*  RENDER                                                       */
+/*  RENDER  (world drawn to offscreen, then warped to display)   */
 /* ============================================================= */
 function render(){
-  ctx.fillStyle = bgBase;
-  ctx.fillRect(0, 0, CW, CH);
+  const r = octx;
+
+  r.fillStyle = bgBase;
+  r.fillRect(0, 0, CW, CH);
 
   let shakeX = 0, shakeY = 0;
   if(G.shake > 0.2){
@@ -774,8 +850,8 @@ function render(){
   const vL = camX - 16, vR = camX + CW + 16;
   const vT = camY - 16, vB = camY + CH + 16;
 
-  ctx.lineCap  = 'round';
-  ctx.lineJoin = 'round';
+  r.lineCap  = 'round';
+  r.lineJoin = 'round';
 
   /* ---------------- walls ---------------- */
   const wp = new Path2D();
@@ -796,58 +872,58 @@ function render(){
   }
 
   if(visible){
-    ctx.strokeStyle = wallGlow;
-    ctx.lineWidth = wallGlowW;
-    ctx.stroke(wp);
+    r.strokeStyle = wallGlow;
+    r.lineWidth = wallGlowW;
+    r.stroke(wp);
 
-    ctx.strokeStyle = wallColor;
-    ctx.lineWidth = wallCoreW;
-    ctx.stroke(wp);
+    r.strokeStyle = wallColor;
+    r.lineWidth = wallCoreW;
+    r.stroke(wp);
   }
 
   /* ---------------- glowing finish wall ---------------- */
   if(goalWall){
     const pulse = 0.55 + 0.45 * Math.sin(G.levelTime * 4);
-    ctx.save();
-    ctx.shadowColor = accent;
-    ctx.shadowBlur  = 18 + pulse * 16;
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth   = Math.max(2.5, s * 0.02);
-    ctx.lineCap     = 'round';
-    ctx.beginPath();
-    ctx.moveTo(goalWall[0] - camX, goalWall[1] - camY);
-    ctx.lineTo(goalWall[2] - camX, goalWall[3] - camY);
-    ctx.stroke();
+    r.save();
+    r.shadowColor = accent;
+    r.shadowBlur  = 18 + pulse * 16;
+    r.strokeStyle = '#ffffff';
+    r.lineWidth   = Math.max(2.5, s * 0.02);
+    r.lineCap     = 'round';
+    r.beginPath();
+    r.moveTo(goalWall[0] - camX, goalWall[1] - camY);
+    r.lineTo(goalWall[2] - camX, goalWall[3] - camY);
+    r.stroke();
 
-    ctx.shadowBlur  = 34 + pulse * 22;
-    ctx.globalAlpha = 0.55;
-    ctx.beginPath();
-    ctx.moveTo(goalWall[0] - camX, goalWall[1] - camY);
-    ctx.lineTo(goalWall[2] - camX, goalWall[3] - camY);
-    ctx.stroke();
-    ctx.restore();
-    ctx.globalAlpha = 1;
+    r.shadowBlur  = 34 + pulse * 22;
+    r.globalAlpha = 0.55;
+    r.beginPath();
+    r.moveTo(goalWall[0] - camX, goalWall[1] - camY);
+    r.lineTo(goalWall[2] - camX, goalWall[3] - camY);
+    r.stroke();
+    r.restore();
+    r.globalAlpha = 1;
   }
 
   /* ---------------- trail ---------------- */
   if(trail.length > 1){
-    ctx.beginPath();
-    ctx.moveTo(trail[0].x - camX, trail[0].y - camY);
+    r.beginPath();
+    r.moveTo(trail[0].x - camX, trail[0].y - camY);
     for(let i = 1; i < trail.length; i++){
-      ctx.lineTo(trail[i].x - camX, trail[i].y - camY);
+      r.lineTo(trail[i].x - camX, trail[i].y - camY);
     }
-    ctx.lineTo(player.x - camX, player.y - camY);
+    r.lineTo(player.x - camX, player.y - camY);
 
     if(G.boosting){
-      ctx.lineWidth   = 2.0;
-      ctx.strokeStyle = 'hsla(' + hue + ',95%,72%,0.95)';
+      r.lineWidth   = 2.0;
+      r.strokeStyle = 'hsla(' + hue + ',95%,72%,0.95)';
     } else {
-      ctx.lineWidth   = 1.4;
-      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      r.lineWidth   = 1.4;
+      r.strokeStyle = 'rgba(255,255,255,0.85)';
     }
-    ctx.lineCap     = 'round';
-    ctx.lineJoin    = 'round';
-    ctx.stroke();
+    r.lineCap     = 'round';
+    r.lineJoin    = 'round';
+    r.stroke();
   }
 
   /* ---------------- shockwaves ---------------- */
@@ -855,59 +931,65 @@ function render(){
     const sw = shockwaves[i];
     const p  = sw.t / sw.dur;
     const e  = 1 - Math.pow(1 - p, 2);
-    const r  = sw.maxR * e;
+    const rad = sw.maxR * e;
     const a  = 1 - p;
 
     const sx = sw.x - camX;
     const sy = sw.y - camY;
 
-    ctx.save();
-    ctx.shadowColor = accent;
-    ctx.shadowBlur  = 16;
+    r.save();
+    r.shadowColor = accent;
+    r.shadowBlur  = 16;
 
-    ctx.strokeStyle = 'hsla(' + hue + ',95%,72%,' + (a * 0.9) + ')';
-    ctx.lineWidth   = 1 + 3.6 * (1 - p);
-    ctx.beginPath();
-    ctx.arc(sx, sy, r, 0, Math.PI * 2);
-    ctx.stroke();
+    r.strokeStyle = 'hsla(' + hue + ',95%,72%,' + (a * 0.9) + ')';
+    r.lineWidth   = 1 + 3.6 * (1 - p);
+    r.beginPath();
+    r.arc(sx, sy, rad, 0, Math.PI * 2);
+    r.stroke();
 
-    ctx.globalAlpha = a * 0.45;
-    ctx.lineWidth   = 1;
-    ctx.beginPath();
-    ctx.arc(sx, sy, r * 0.62, 0, Math.PI * 2);
-    ctx.stroke();
+    r.globalAlpha = a * 0.45;
+    r.lineWidth   = 1;
+    r.beginPath();
+    r.arc(sx, sy, rad * 0.62, 0, Math.PI * 2);
+    r.stroke();
 
-    ctx.restore();
+    r.restore();
   }
 
   /* ---------------- player (white, smaller) ---------------- */
   const px = player.x - camX;
   const py = player.y - camY;
 
-  ctx.save();
-  ctx.translate(px, py);
-  ctx.rotate(visAng);
+  r.save();
+  r.translate(px, py);
+  r.rotate(visAng);
 
   if(boostGlow > 0.03){
-    ctx.shadowColor = accent;
-    ctx.shadowBlur  = 8 + boostGlow * 20;
+    r.shadowColor = accent;
+    r.shadowBlur  = 8 + boostGlow * 20;
   } else {
-    ctx.shadowColor = '#ffffff';
-    ctx.shadowBlur  = 8;
+    r.shadowColor = '#ffffff';
+    r.shadowBlur  = 8;
   }
-  ctx.fillStyle = '#ffffff';
+  r.fillStyle = '#ffffff';
 
-  ctx.beginPath();
-  ctx.moveTo( 5.0,  0);
-  ctx.lineTo(-3.4, -3.2);
-  ctx.lineTo(-1.6,  0);
-  ctx.lineTo(-3.4,  3.2);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
-  ctx.shadowBlur = 0;
+  r.beginPath();
+  r.moveTo( 5.0,  0);
+  r.lineTo(-3.4, -3.2);
+  r.lineTo(-1.6,  0);
+  r.lineTo(-3.4,  3.2);
+  r.closePath();
+  r.fill();
+  r.restore();
 
-  /* ---------------- navigator ---------------- */
+  /* =============================================================
+     WARP the offscreen world onto the display canvas (globe)
+     ============================================================= */
+  ctx.fillStyle = bgBase;
+  ctx.fillRect(0, 0, CW, CH);
+  warpBlit();
+
+  /* ---------------- navigator (UI, unwarped) ---------------- */
   renderNavigator();
 }
 
