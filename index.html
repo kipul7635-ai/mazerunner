@@ -30,6 +30,26 @@
     line-height: 1.6;
   }
   #hud b { font-weight: normal; letter-spacing: 2px; }
+
+  /* ---- combo counter (top left, under LEVEL) ---- */
+  #combo {
+    position: fixed; top: 44px; left: 16px;
+    font-size: 13px; letter-spacing: 2px;
+    pointer-events: none;
+    text-transform: uppercase;
+    opacity: 0;
+    transform-origin: left center;
+    transition: opacity .18s, color .5s;
+    text-shadow: 0 0 12px currentColor;
+  }
+  #combo.on { opacity: 1; }
+  #combo.pop { animation: comboPop .32s cubic-bezier(.2,1.7,.4,1); }
+  @keyframes comboPop {
+    0%   { transform: scale(1.9); }
+    60%  { transform: scale(.94); }
+    100% { transform: scale(1); }
+  }
+
   #timer {
     position: fixed; top: 14px; left: 50%;
     transform: translateX(-50%);
@@ -54,6 +74,30 @@
   #timer .tminus.over {
     color: #ff5566;
   }
+
+  /* ---- t-minus depletion bar (below the timers) ---- */
+  #tbar {
+    position: fixed;
+    top: 37px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 212px;
+    height: 3px;
+    background: rgba(255,255,255,0.10);
+    border-radius: 2px;
+    overflow: hidden;
+    pointer-events: none;
+    transition: background .5s;
+  }
+  #tbarFill {
+    height: 100%;
+    width: 100%;
+    border-radius: 2px;
+    background: #4fa8ff;
+    transition: background .5s;
+    will-change: width;
+  }
+
   #msg {
     position: fixed; left: 0; right: 0; top: 42%;
     text-align: center;
@@ -107,11 +151,13 @@
 <body>
 <canvas id="c"></canvas>
 <div id="hud"></div>
+<div id="combo"></div>
 <div id="timer">
   <span id="tCur">00:000</span>
   <span class="par" id="tPar">/ 00:000</span>
   <span class="tminus" id="tMinus">T-00:000</span>
 </div>
+<div id="tbar"><div id="tbarFill"></div></div>
 <div id="msg"></div>
 <button id="btn" type="button"></button>
 <div id="hint">◀ tap left &nbsp;·&nbsp; tap right ▶ &nbsp;·&nbsp; hold both = boost</div>
@@ -122,10 +168,13 @@
 const cv      = document.getElementById('c');
 const ctx     = cv.getContext('2d');
 const hudEl   = document.getElementById('hud');
+const comboEl = document.getElementById('combo');
 const timerEl = document.getElementById('timer');
 const tCurEl  = document.getElementById('tCur');
 const tParEl  = document.getElementById('tPar');
 const tMinEl  = document.getElementById('tMinus');
+const tbarEl  = document.getElementById('tbar');
+const tbarFil = document.getElementById('tbarFill');
 const msgEl   = document.getElementById('msg');
 const hintEl  = document.getElementById('hint');
 const btnEl   = document.getElementById('btn');
@@ -143,7 +192,6 @@ let hue = 200;
 let accent     = 'hsl(200,95%,62%)';
 let accentSoft = 'hsla(200,95%,62%,0.55)';
 let wallColor  = 'hsl(200,95%,62%)';
-let wallSide   = 'hsl(200,70%,22%)';
 let wallGlow   = 'hsla(200,95%,62%,0.13)';
 let bgBase     = 'hsl(200,40%,4%)';
 
@@ -151,7 +199,6 @@ function applyTheme(){
   accent     = 'hsl(' + hue + ',95%,62%)';
   accentSoft = 'hsla(' + hue + ',95%,62%,0.55)';
   wallColor  = accent;
-  wallSide   = 'hsl(' + hue + ',70%,22%)';
   wallGlow   = 'hsla(' + hue + ',95%,62%,0.13)';
   bgBase     = 'hsl(' + hue + ',40%,4%)';
 
@@ -161,6 +208,9 @@ function applyTheme(){
   msgEl.style.color   = accent;
   hintEl.style.color  = accentSoft;
   btnEl.style.color   = accent;
+  comboEl.style.color = accent;
+  tbarFil.style.background = accent;
+
   const b = hudEl.querySelector('b');
   if(b) b.style.color = accent;
 }
@@ -259,7 +309,9 @@ const G = {
   parTime: 10,
   shake: 0,
   maxSpeed: 210,
-  boosting: false
+  boosting: false,
+  combo: 0,            /* consecutive fast clears -> x1, x2, x3 ... */
+  comboBroken: false   /* true once the t-minus has run out this level */
 };
 
 /* Direction constants: 0=right, 1=down, 2=left, 3=up */
@@ -277,7 +329,6 @@ let s = 200;
 /* wall stroke widths, scaled with corridor size */
 let wallGlowW = 10;
 let wallCoreW = 2;
-let wallHeight = 10;         /* visual 2.5D height in screen px  */
 
 let path       = [];          // array of [x,y] grid cells forming the corridor
 let pathIdxMap = new Map();   // key (y*W + x) -> index into path
@@ -483,6 +534,7 @@ function generateCorridor(targetLen, N, attempts){
 /* ============================================================= */
 function buildLevel(){
   hideButton();
+  resetTimerCache();
   pickColors();
 
   const level = G.level;
@@ -495,9 +547,8 @@ function buildLevel(){
   /* ---- corridor narrows a little every level ---- */
   s = Math.max(90, 200 * Math.pow(0.97, level - 1));
 
-  wallGlowW  = Math.max(5,   s * 0.05);
-  wallCoreW  = Math.max(1.2, s * 0.01);
-  wallHeight = Math.max(7,   s * 0.075);
+  wallGlowW = Math.max(5,   s * 0.05);
+  wallCoreW = Math.max(1.2, s * 0.01);
 
   G.maxSpeed = Math.round((132 + level * 7) * 1.5 * (s / 200));
 
@@ -517,10 +568,12 @@ function buildLevel(){
   goalX = (goalCell.x + 0.5) * s;
   goalY = (goalCell.y + 0.5) * s;
 
-  /* ---- PAR TIME (estimated time to beat the level) ---- */
+  /* ---- PAR TIME (estimated time to beat the level) ----
+     Base estimate is made 15% more generous.            */
   {
     const cellTime = s / G.maxSpeed;
-    G.parTime = path.length * cellTime * 0.62 + 0.6;
+    const basePar  = path.length * cellTime * 0.62 + 0.6;
+    G.parTime = basePar * 1.15;
   }
 
   /* ---- walls: 4 sides of each path cell minus the openings ---- */
@@ -593,9 +646,10 @@ function buildLevel(){
 
   keys.clear(); pointers.clear();
 
-  G.levelTime = 0;
-  G.state     = 'play';
-  G.shake     = 0;
+  G.levelTime   = 0;
+  G.state       = 'play';
+  G.shake       = 0;
+  G.comboBroken = false;   /* combo survives between levels, but not a timeout */
 }
 
 /* ------------------------------------------------------------- */
@@ -714,6 +768,32 @@ function updateNavigator(){
 }
 
 /* ============================================================= */
+/*  COMBO                                                        */
+/* ============================================================= */
+function refreshCombo(pop){
+  if(G.combo > 0){
+    comboEl.textContent = 'x' + G.combo;
+    comboEl.classList.add('on');
+  } else {
+    comboEl.textContent = '';
+    comboEl.classList.remove('on');
+  }
+
+  if(pop && G.combo > 0){
+    comboEl.classList.remove('pop');
+    void comboEl.offsetWidth;   /* restart the CSS animation */
+    comboEl.classList.add('pop');
+  }
+}
+
+function breakCombo(){
+  const had = G.combo > 0;
+  G.combo = 0;
+  refreshCombo(false);
+  return had;
+}
+
+/* ============================================================= */
 /*  EVENTS                                                       */
 /* ============================================================= */
 let msgTimeout = 0;
@@ -721,7 +801,7 @@ function showMsg(text){
   msgEl.textContent = text;
   msgEl.classList.add('on');
   clearTimeout(msgTimeout);
-  msgTimeout = setTimeout(function(){ msgEl.classList.remove('on'); }, 420);
+  msgTimeout = setTimeout(function(){ msgEl.classList.remove('on'); }, 480);
 }
 
 function crash(){
@@ -735,11 +815,19 @@ function crash(){
 function win(){
   G.state = 'win';
   G.boosting = false;
+
+  /* Faster than the (already generous) par estimate?  Combo up. */
+  if(!G.comboBroken && G.levelTime <= G.parTime){
+    G.combo++;
+    refreshCombo(true);
+  }
+
   showButton('continue', 'continue');
 }
 
 function resetLevel(){
   hideButton();
+  resetTimerCache();
 
   player.x = (startCell.x + 0.5) * s;
   player.y = (startCell.y + 0.5) * s;
@@ -769,9 +857,10 @@ function resetLevel(){
   boostRamp = 0;
   G.boosting = false;
 
-  G.levelTime = 0;
-  G.state     = 'play';
-  G.shake     = 0;
+  G.levelTime   = 0;
+  G.state       = 'play';
+  G.shake       = 0;
+  G.comboBroken = false;
 }
 
 /* ============================================================= */
@@ -845,6 +934,13 @@ function update(dt){
   if(G.state === 'play'){
     G.levelTime += dt;
 
+    /* ---- ran out of the par window -> combo breaks ---- */
+    if(!G.comboBroken && G.levelTime > G.parTime){
+      G.comboBroken = true;
+      if(breakCombo()) showMsg('COMBO LOST');
+      else             showMsg('TIME UP');
+    }
+
     const mul   = boosting ? currentBoostMult() : 1;
     const speed = G.maxSpeed * mul;
     const dirv  = DIR_VEC[player.dir];
@@ -910,96 +1006,37 @@ function render(){
   r.lineCap  = 'round';
   r.lineJoin = 'round';
 
-  /* =============================================================
-     WALLS  —  extruded toward screen centre for a 2.5D feel
-     ============================================================= */
-  const scx = CW * 0.5;
-  const scy = CH * 0.5;
-  const EH  = wallHeight;                 /* extrude amount          */
-
-  const sidePath = new Path2D();          /* dark "wall side" quads  */
-  const topPath  = new Path2D();          /* bright "wall top" edge  */
+  /* ---------------- walls ---------------- */
+  const wp = new Path2D();
   let visible = 0;
 
-  const pad = 24 + EH;
-
   for(let i = 0; i < segs.length; i += 4){
-    const bx1 = segs[i]   - camX;
-    const by1 = segs[i+1] - camY;
-    const bx2 = segs[i+2] - camX;
-    const by2 = segs[i+3] - camY;
+    const x1 = segs[i],   y1 = segs[i+1];
+    const x2 = segs[i+2], y2 = segs[i+3];
 
-    if(bx1 < -pad && bx2 < -pad) continue;
-    if(bx1 > CW+pad && bx2 > CW+pad) continue;
-    if(by1 < -pad && by2 < -pad) continue;
-    if(by1 > CH+pad && by2 > CH+pad) continue;
+    if(x1 < vL && x2 < vL) continue;
+    if(x1 > vR && x2 > vR) continue;
+    if(y1 < vT && y2 < vT) continue;
+    if(y1 > vB && y2 > vB) continue;
 
-    /* radial offset (toward screen centre) — walls stand "up" out of
-       the globe, so the extrude direction matches the curvature      */
-    const mx = (bx1 + bx2) * 0.5;
-    const my = (by1 + by2) * 0.5;
-    let ox = scx - mx;
-    let oy = scy - my;
-    const ol = Math.sqrt(ox*ox + oy*oy) || 1;
-    ox = ox / ol * EH;
-    oy = oy / ol * EH;
-
-    /* side face parallelogram */
-    sidePath.moveTo(bx1,     by1);
-    sidePath.lineTo(bx2,     by2);
-    sidePath.lineTo(bx2 + ox, by2 + oy);
-    sidePath.lineTo(bx1 + ox, by1 + oy);
-    sidePath.closePath();
-
-    /* top edge */
-    topPath.moveTo(bx1 + ox, by1 + oy);
-    topPath.lineTo(bx2 + ox, by2 + oy);
-
+    wp.moveTo(x1 - camX, y1 - camY);
+    wp.lineTo(x2 - camX, y2 - camY);
     visible++;
   }
 
   if(visible){
-    /* 1. soft glow around the top edge */
     r.strokeStyle = wallGlow;
-    r.lineWidth   = wallGlowW;
-    r.lineCap     = 'round';
-    r.stroke(topPath);
+    r.lineWidth = wallGlowW;
+    r.stroke(wp);
 
-    /* 2. dark side faces */
-    r.fillStyle = wallSide;
-    r.fill(sidePath);
-
-    /* 3. bright top edge */
     r.strokeStyle = wallColor;
-    r.lineWidth   = wallCoreW;
-    r.stroke(topPath);
+    r.lineWidth = wallCoreW;
+    r.stroke(wp);
   }
 
-  /* ---------------- glowing finish wall (also extruded) ---------------- */
+  /* ---------------- glowing finish wall ---------------- */
   if(goalWall){
     const pulse = 0.55 + 0.45 * Math.sin(G.levelTime * 4);
-
-    let gx1 = goalWall[0] - camX, gy1 = goalWall[1] - camY;
-    let gx2 = goalWall[2] - camX, gy2 = goalWall[3] - camY;
-
-    const gmx = (gx1 + gx2) * 0.5;
-    const gmy = (gy1 + gy2) * 0.5;
-    let gox = scx - gmx;
-    let goy = scy - gmy;
-    const gol = Math.sqrt(gox*gox + goy*goy) || 1;
-    gox = gox / gol * EH;
-    goy = goy / gol * EH;
-
-    /* side face */
-    r.fillStyle = 'hsla(' + hue + ',95%,45%,0.75)';
-    r.beginPath();
-    r.moveTo(gx1, gy1);
-    r.lineTo(gx2, gy2);
-    r.lineTo(gx2 + gox, gy2 + goy);
-    r.lineTo(gx1 + gox, gy1 + goy);
-    r.closePath();
-    r.fill();
-
     r.save();
     r.shadowColor = accent;
     r.shadowBlur  = 18 + pulse * 16;
@@ -1007,15 +1044,15 @@ function render(){
     r.lineWidth   = Math.max(2.5, s * 0.02);
     r.lineCap     = 'round';
     r.beginPath();
-    r.moveTo(gx1 + gox, gy1 + goy);
-    r.lineTo(gx2 + gox, gy2 + goy);
+    r.moveTo(goalWall[0] - camX, goalWall[1] - camY);
+    r.lineTo(goalWall[2] - camX, goalWall[3] - camY);
     r.stroke();
 
     r.shadowBlur  = 34 + pulse * 22;
     r.globalAlpha = 0.55;
     r.beginPath();
-    r.moveTo(gx1 + gox, gy1 + goy);
-    r.lineTo(gx2 + gox, gy2 + goy);
+    r.moveTo(goalWall[0] - camX, goalWall[1] - camY);
+    r.lineTo(goalWall[2] - camX, goalWall[3] - camY);
     r.stroke();
     r.restore();
     r.globalAlpha = 1;
@@ -1159,7 +1196,16 @@ function formatTime(t){
          (ms < 100 ? (ms < 10 ? '00' : '0') : '') + ms;
 }
 
-let curCache = '', parCache = '', minCache = '', overCache = null;
+let curCache = '', parCache = '', minCache = '', overCache = null, barCache = -1;
+
+function resetTimerCache(){
+  curCache = ''; parCache = ''; minCache = '';
+  overCache = null; barCache = -1;
+  tbarFil.style.width = '100%';
+  tbarFil.style.background = accent;
+  tMinEl.classList.remove('over');
+}
+
 function updateTimer(){
   const curStr = formatTime(G.levelTime);
   if(curStr !== curCache){ curCache = curStr; tCurEl.textContent = curStr; }
@@ -1175,6 +1221,18 @@ function updateTimer(){
   if(over !== overCache){
     overCache = over;
     tMinEl.classList.toggle('over', over);
+    tbarFil.style.background = over ? '#ff5566' : accent;
+  }
+
+  /* ---- depletion bar: how much of the par window is left ---- */
+  let frac = G.parTime > 0 ? (G.parTime - G.levelTime) / G.parTime : 0;
+  if(frac < 0) frac = 0;
+  else if(frac > 1) frac = 1;
+
+  const pct = Math.round(frac * 1000) / 10;   /* 0.1 % resolution */
+  if(pct !== barCache){
+    barCache = pct;
+    tbarFil.style.width = pct + '%';
   }
 }
 
@@ -1201,6 +1259,7 @@ function frame(now){
 /* ============================================================= */
 resize();
 buildLevel();
+refreshCombo(false);
 requestAnimationFrame(frame);
 
 })();
