@@ -439,6 +439,170 @@ function currentBoostMult(){
 }
 
 /* ============================================================= */
+/*  AUDIO  —  layered stems that fade in as the combo grows      */
+/*                                                               */
+/*  Each stem is a looping buffer source running through a       */
+/*  lowpass filter (muffle) and a gain node. Every stem starts   */
+/*  at the exact same AudioContext timestamp so the loops stay   */
+/*  perfectly phase-aligned for layering.                        */
+/*                                                               */
+/*  Combo → stems:                                               */
+/*    0  –  5   PADS      (quiet + muffled → loud + clear)       */
+/*    5  – 10   DRUMS                                            */
+/*   10  – 15   KICK                                             */
+/*   15  – 20   BASS                                             */
+/*   20  – 25   PERCS                                            */
+/*   25  – 30   NOISE                                            */
+/*   30  – 35   LEAD                                             */
+/*   35  – 40   LEADS                                            */
+/* ============================================================= */
+
+/* order matters: index 0..7 */
+const LAYERS = [
+  { name:'PADS',  start: 0,  baseGain: 0.55 },
+  { name:'DRUMS', start: 5,  baseGain: 0.70 },
+  { name:'KICK',  start:10,  baseGain: 0.80 },
+  { name:'BASS',  start:15,  baseGain: 0.65 },
+  { name:'PERCS', start:20,  baseGain: 0.55 },
+  { name:'NOISE', start:25,  baseGain: 0.40 },
+  { name:'LEAD',  start:30,  baseGain: 0.50 },
+  { name:'LEADS', start:35,  baseGain: 0.45 }
+];
+
+const MUFFLE_FREQ  = 280;    /* Hz — heavily filtered "behind a door" */
+const CLEAR_FREQ   = 16000;  /* Hz — essentially wide open            */
+const PADS_FLOOR   = 0.15;   /* pads never fully disappear            */
+const FADE_TAU     = 0.15;   /* seconds — smoothing time constant     */
+const STEM_SPAN    = 5;      /* combos it takes for a stem to bloom   */
+const MASTER_GAIN  = 0.5;
+
+const audio = {
+  ctx:     null,
+  master:  null,
+  buffers: null,
+  nodes:   null,
+  started: false,
+  ready:   false
+};
+
+function initAudio(){
+  if(audio.ctx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if(!AC) return;
+  try { audio.ctx = new AC(); }
+  catch(e){ return; }
+
+  audio.master = audio.ctx.createGain();
+  audio.master.gain.value = MASTER_GAIN;
+  audio.master.connect(audio.ctx.destination);
+
+  audio.nodes = new Array(LAYERS.length);
+
+  Promise.all(LAYERS.map(function(layer){
+    return fetch(layer.name + '.ogg')
+      .then(function(r){
+        if(!r.ok) throw new Error('HTTP ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function(ab){ return audio.ctx.decodeAudioData(ab); })
+      .catch(function(err){
+        console.warn('audio load failed:', layer.name, err);
+        return null;
+      });
+  })).then(function(bufs){
+    audio.buffers = bufs;
+    audio.ready = true;
+  });
+}
+
+function startAudio(){
+  if(!audio.ctx) initAudio();
+  if(!audio.ctx || audio.started) return;
+
+  /* user-gesture resume */
+  if(audio.ctx.state === 'suspended'){
+    try { audio.ctx.resume(); } catch(e){}
+  }
+
+  /* wait for the buffer decode to finish if it hasn't yet */
+  if(!audio.ready){
+    if(!audio._waiting){
+      audio._waiting = true;
+      const poll = function(){
+        if(audio.started){ audio._waiting = false; return; }
+        if(audio.ready){ audio._waiting = false; startAudio(); }
+        else setTimeout(poll, 40);
+      };
+      setTimeout(poll, 40);
+    }
+    return;
+  }
+
+  /* single shared start time → everything phase-locked */
+  const t0 = audio.ctx.currentTime + 0.06;
+
+  for(let i = 0; i < LAYERS.length; i++){
+    const buf = audio.buffers[i];
+    if(!buf) continue;
+
+    const src = audio.ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop   = true;
+
+    const filter = audio.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = MUFFLE_FREQ;
+    filter.Q.value = 0.7;
+
+    const gain = audio.ctx.createGain();
+    gain.gain.value = 0;
+
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(audio.master);
+    src.start(t0);
+
+    audio.nodes[i] = { src: src, gain: gain, filter: filter };
+  }
+
+  audio.started = true;
+  /* apply initial state immediately so the first frame isn't a jump */
+  updateAudio(G.combo);
+}
+
+/* how "present" a stem is at a given combo: 0..1 */
+function layerPresence(layer, combo){
+  if(layer.name === 'PADS'){
+    /* pads are always audible, but quiet + muffled at combo 0 */
+    const t = Math.min(1, Math.max(0, combo) / STEM_SPAN);
+    return PADS_FLOOR + (1 - PADS_FLOOR) * t;
+  }
+  if(combo < layer.start) return 0;
+  return Math.min(1, (combo - layer.start) / STEM_SPAN);
+}
+
+/* push targets to the audio graph — called every frame */
+function updateAudio(combo){
+  if(!audio.started || !audio.ctx) return;
+
+  const t = audio.ctx.currentTime;
+
+  for(let i = 0; i < LAYERS.length; i++){
+    const node = audio.nodes[i];
+    if(!node) continue;
+
+    const layer = LAYERS[i];
+    const p     = layerPresence(layer, combo);
+
+    const targetGain = layer.baseGain * p;
+    const targetFreq = MUFFLE_FREQ + (CLEAR_FREQ - MUFFLE_FREQ) * p;
+
+    node.gain.gain.setTargetAtTime(targetGain, t, FADE_TAU);
+    node.filter.frequency.setTargetAtTime(targetFreq, t, FADE_TAU);
+  }
+}
+
+/* ============================================================= */
 /*  BUTTONS                                                      */
 /* ============================================================= */
 let primaryAction   = null;
@@ -473,18 +637,16 @@ btnEl.addEventListener('click', function(e){
   const a = primaryAction;
   hideAllButtons();
   if(a === 'start'){
-    /* begin the run */
+    /* begin the run — this click is the user gesture that unlocks audio */
+    startAudio();
     G.state = 'play';
     G.levelTime = 0;
     resetTimerCache();
-    startAudio();
   } else if(a === 'restart'){
     resetLevel();
-    startAudio();
   } else if(a === 'continue'){
     G.level++;
     buildLevel();
-    startAudio();
   }
 });
 
@@ -517,18 +679,6 @@ function turnRight(){
   player.dir = (player.dir + 1) & 3;
   player.ang = DIR_ANG[player.dir];
 }
-
-/* any gesture unlocks the audio context */
-let gestureSeen = false;
-function onGesture(){
-  gestureSeen = true;
-  if(actx && actx.state === 'suspended'){
-    try { actx.resume(); } catch(_){}
-  }
-  if(G.state === 'play') startAudio();
-}
-addEventListener('pointerdown', onGesture, true);
-addEventListener('keydown',     onGesture, true);
 
 addEventListener('keydown', function(e){
   if((e.key === 'Enter' || e.key === ' ') && primaryAction){
@@ -683,11 +833,12 @@ function buildLevel(){
   goalX = (goalCell.x + 0.5) * s;
   goalY = (goalCell.y + 0.5) * s;
 
-  /* PAR time: 15% more generous than raw estimate, times combo bonus */
+  /* PAR time: 15% more generous than the raw estimate,
+     plus 30% extra head-room so combos are easier to keep alive */
   {
     const cellTime = s / G.maxSpeed;
     const basePar  = path.length * cellTime * 0.62 + 0.6;
-    G.parTime = basePar * 1.15 * COMBO_TIME_BONUS;
+    G.parTime = basePar * 1.15 * 1.3;
   }
 
   /* stars — only in the void outside the maze */
@@ -993,190 +1144,6 @@ function goToMenu(){
 }
 
 /* ============================================================= */
-/*  ============  LAYERED MUSIC (COMBO DRIVEN)  ================ */
-/*                                                               */
-/*  8 stems live next to this file (no subfolders):              */
-/*    PADS.ogg  DRUMS.ogg  KICK.ogg  BASS.ogg                    */
-/*    PERCS.ogg NOISE.ogg  LEAD.ogg  LEADS.ogg                   */
-/*                                                               */
-/*  Each stem owns a 5-combo window of the combo counter:        */
-/*    pads   0-5    drums  5-10   kick   10-15   bass  15-20     */
-/*    percs  20-25  noise  25-30  lead   30-35   leads 35-40     */
-/*                                                               */
-/*  A stem is silent until its window opens. Inside the window   */
-/*  it ramps from QUIET + heavily low-passed (muffled) up to     */
-/*  full volume and fully open. Past the window it stays clear.  */
-/*                                                               */
-/*  Every stem is started at the very same instant and loops     */
-/*  from the same playback position, so the layers always line   */
-/*  up. A slow drift corrector keeps them sample-aligned.        */
-/* ============================================================= */
-
-const TRACK_FILES = ['PADS','DRUMS','KICK','BASS','PERCS','NOISE','LEAD','LEADS'];
-
-const LAYER_BAND   = 5;        /* combos each stem takes to open    */
-const LAYER_QUIET  = 0.14;     /* gain the instant a stem joins     */
-const LAYER_LOUD   = 1.0;      /* gain once fully opened            */
-const CUT_MUFFLED  = 550;      /* Hz — "quiet + muffled" state      */
-const CUT_CLEAR    = 16000;    /* Hz — "clear and nice" state       */
-const MASTER_VOL   = 0.55;
-const SYNC_EVERY   = 2.0;      /* seconds between drift checks      */
-const SYNC_TOL     = 0.18;     /* seconds of drift we tolerate      */
-
-let actx        = null;
-let masterGain  = null;
-let layers      = [];
-let audioReady  = false;       /* nodes built, context alive      */
-let audioPlaying = false;      /* stems actually rolling          */
-let syncAcc     = 0;
-
-function ensureAudio(){
-  if(audioReady) return true;
-
-  const AC = window.AudioContext || window.webkitAudioContext;
-  if(!AC) return false;
-
-  try {
-    actx = new AC();
-
-    masterGain = actx.createGain();
-    masterGain.gain.value = 0;
-    masterGain.connect(actx.destination);
-
-    for(let i = 0; i < TRACK_FILES.length; i++){
-      const el = new Audio();
-      el.src      = TRACK_FILES[i] + '.ogg';
-      el.loop     = true;
-      el.preload  = 'auto';
-      el.autoplay = false;
-
-      const src = actx.createMediaElementSource(el);
-
-      const filt = actx.createBiquadFilter();
-      filt.type = 'lowpass';
-      filt.frequency.value = CUT_MUFFLED;
-      filt.Q.value = 0.0001;
-
-      const g = actx.createGain();
-      g.gain.value = 0;
-
-      src.connect(filt);
-      filt.connect(g);
-      g.connect(masterGain);
-
-      layers.push({ el: el, filt: filt, g: g, tg: -1, tc: -1 });
-    }
-  } catch(err){
-    actx = null;
-    masterGain = null;
-    layers = [];
-    return false;
-  }
-
-  audioReady = true;
-  return true;
-}
-
-function startAudio(){
-  if(!ensureAudio()) return;
-
-  if(actx.state === 'suspended'){
-    try { actx.resume(); } catch(_){}
-  }
-
-  if(audioPlaying) return;
-  audioPlaying = true;
-
-  /* EVERY stem starts at position 0 at the same moment, muted or not.
-     That guarantees perfect phase alignment when one "joins in" later. */
-  for(let i = 0; i < layers.length; i++){
-    const el = layers[i].el;
-    try { el.currentTime = 0; } catch(_){}
-    const pr = el.play();
-    if(pr && pr.catch) pr.catch(function(){});
-  }
-
-  const t = actx.currentTime;
-  masterGain.gain.cancelScheduledValues(t);
-  masterGain.gain.setValueAtTime(0, t);
-  masterGain.gain.linearRampToValueAtTime(MASTER_VOL, t + 1.2);
-
-  syncAcc = 0;
-}
-
-/* keep all stems locked to the pads clock */
-function syncLayers(){
-  if(!audioPlaying) return;
-
-  let ref = null;
-  for(let i = 0; i < layers.length; i++){
-    const d = layers[i].el.duration;
-    if(d && isFinite(d) && d > 0.1){ ref = layers[i].el; break; }
-  }
-  if(!ref) return;
-
-  const rt = ref.currentTime;
-
-  for(let i = 0; i < layers.length; i++){
-    const el = layers[i].el;
-    if(el === ref) continue;
-
-    const d = el.duration;
-    if(!d || !isFinite(d) || d <= 0.1) continue;
-
-    const exp = rt % d;
-    let diff = el.currentTime - exp;
-    if(diff >  d * 0.5) diff -= d;
-    if(diff < -d * 0.5) diff += d;
-
-    if(Math.abs(diff) > SYNC_TOL){
-      try { el.currentTime = exp; } catch(_){}
-    }
-  }
-}
-
-function updateAudio(dt){
-  if(!audioPlaying || !actx) return;
-
-  const now   = actx.currentTime;
-  const combo = G.combo;
-
-  for(let i = 0; i < layers.length; i++){
-    const L = layers[i];
-
-    const bandStart = i * LAYER_BAND;
-
-    let targetGain = 0;
-    let targetCut  = CUT_MUFFLED;
-
-    if(combo >= bandStart){
-      let p = (combo - bandStart) / LAYER_BAND;
-      if(p > 1) p = 1;
-
-      targetGain = LAYER_QUIET + (LAYER_LOUD - LAYER_QUIET) * p;
-      /* perceptual (logarithmic) sweep from muffled to wide open */
-      targetCut  = CUT_MUFFLED * Math.pow(CUT_CLEAR / CUT_MUFFLED, p);
-    }
-
-    if(targetGain !== L.tg){
-      L.tg = targetGain;
-      L.g.gain.setTargetAtTime(targetGain, now, 0.35);
-    }
-
-    if(targetCut !== L.tc){
-      L.tc = targetCut;
-      L.filt.frequency.setTargetAtTime(targetCut, now, 0.35);
-    }
-  }
-
-  syncAcc += dt;
-  if(syncAcc >= SYNC_EVERY){
-    syncAcc = 0;
-    syncLayers();
-  }
-}
-
-/* ============================================================= */
 /*  UPDATE                                                       */
 /* ============================================================= */
 function update(dt){
@@ -1264,14 +1231,12 @@ function update(dt){
       player.x += dx / steps;
       player.y += dy / steps;
 
-      if(distToGoalWall() < player.r + 5){ win(); break; }
+      if(distToGoalWall() < player.r + 5){ win(); return; }
 
-      if(hitsWall(player.x, player.y)){ crash(); break; }
+      if(hitsWall(player.x, player.y)){ crash(); return; }
     }
-  }
 
-  /* trail */
-  if(G.state === 'play' && trail.length){
+    /* trail */
     const lastT = trail[trail.length - 1];
     const tdx = player.x - lastT.x;
     const tdy = player.y - lastT.y;
@@ -1279,6 +1244,7 @@ function update(dt){
       trail.push({ x: player.x, y: player.y });
       if(trail.length > 3000) trail.shift();
     }
+
     updateNavigator();
   }
 
@@ -1291,8 +1257,8 @@ function update(dt){
     cam.y += (camTargetY - cam.y) * ck;
   }
 
-  /* music follows the combo */
-  updateAudio(dt);
+  /* audio stems follow the current combo */
+  updateAudio(G.combo);
 }
 
 /* ============================================================= */
@@ -1599,6 +1565,11 @@ resetTimerCache();
 refreshCombo(false);
 showPrimary('START', 'start');
 hideSecondary();
+
+/* Preload the stems so the first click has nothing to wait on.
+   (The AudioContext starts suspended until the user clicks START.) */
+initAudio();
+
 requestAnimationFrame(frame);
 
 })();
