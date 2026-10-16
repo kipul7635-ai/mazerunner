@@ -249,178 +249,6 @@ function pickColors(){
 }
 
 /* ============================================================= */
-/*  AUDIO  —  8 looping stems, layered by combo streak           */
-/* ============================================================= */
-/*
-   PADS  DRUMS  KICK  BASS  PERCS  NOISE  LEAD  LEADS
-
-   Every stem is started at exactly the same moment and loops
-   forever, so they are always sample-locked to one another.
-   A stem's audibility is controlled purely with gain + a
-   lowpass "muffle" filter, which lets us fade a layer in at any
-   point in the run without ever breaking the sync.
-
-   Band width is 5 combos, stretched by 30%  ->  6.5
-      combo  0 ..  6.5   pads   (quiet+muffled  ->  clear)
-      combo  6.5 .. 13   drums
-      combo 13 .. 19.5   kick
-      combo 19.5 .. 26   bass
-      combo 26 .. 32.5   percs
-      combo 32.5 .. 39   noise
-      combo 39 .. 45.5   lead
-      combo 45.5 .. 52   leads
-*/
-const AUDIO_NAMES = ['PADS','DRUMS','KICK','BASS','PERCS','NOISE','LEAD','LEADS'];
-const AUDIO_MAX   = [ 0.55,  0.42,  0.50, 0.45,  0.34,  0.24,  0.30,  0.30 ];
-const COMBO_BAND  = 6.5;     /* 5 * 1.3  */
-const QUIET_MUL   = 0.20;    /* level of a freshly-joined stem */
-const FREQ_LO     = 380;     /* muffled cutoff  */
-const FREQ_HI     = 19000;   /* wide-open cutoff */
-
-const audio = {
-  ctx:     null,
-  master:  null,
-  tracks:  [],
-  ready:   false,
-  loading: false,
-  failed:  false,
-  wantOn:  false
-};
-
-function decodeAB(actx, ab){
-  return new Promise(function(res, rej){
-    let done = false;
-    const ok = function(b){ if(!done){ done = true; res(b); } };
-    const no = function(e){ if(!done){ done = true; rej(e); } };
-    const p = actx.decodeAudioData(ab, ok, no);
-    if(p && typeof p.then === 'function') p.then(ok, no);
-  });
-}
-
-function initAudio(){
-  if(audio.ready || audio.loading || audio.failed) return;
-  audio.loading = true;
-
-  let actx;
-  try{
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if(!AC){ audio.failed = true; audio.loading = false; return; }
-    actx = new AC();
-  }catch(e){
-    audio.failed = true; audio.loading = false; return;
-  }
-
-  audio.ctx = actx;
-  if(actx.state === 'suspended'){ try{ actx.resume(); }catch(_){} }
-
-  const master = actx.createGain();
-  master.gain.value = 0;
-
-  const comp = actx.createDynamicsCompressor();
-  comp.threshold.value = -8;
-  comp.knee.value      = 6;
-  comp.ratio.value     = 8;
-  comp.attack.value    = 0.004;
-  comp.release.value   = 0.20;
-
-  master.connect(comp);
-  comp.connect(actx.destination);
-  audio.master = master;
-
-  Promise.all(AUDIO_NAMES.map(function(name){
-    return fetch(name + '.ogg')
-      .then(function(r){
-        if(!r.ok) throw new Error(name + '.ogg ' + r.status);
-        return r.arrayBuffer();
-      })
-      .then(function(ab){ return decodeAB(actx, ab); });
-  })).then(function(buffers){
-
-    const tracks = [];
-    for(let i = 0; i < buffers.length; i++){
-      const g = actx.createGain();
-      g.gain.value = 0;
-
-      const f = actx.createBiquadFilter();
-      f.type = 'lowpass';
-      f.frequency.value = FREQ_LO;
-      f.Q.value = 0.7;
-
-      g.connect(f);
-      f.connect(master);
-
-      tracks.push({ name: AUDIO_NAMES[i], buf: buffers[i], gain: g, filt: f, src: null });
-    }
-
-    /* everything starts at the SAME instant -> permanent sync */
-    const t0 = actx.currentTime + 0.10;
-    for(let i = 0; i < tracks.length; i++){
-      const src = actx.createBufferSource();
-      src.buffer = tracks[i].buf;
-      src.loop   = true;
-      src.connect(tracks[i].gain);
-      try{ src.start(t0, 0); }catch(_){}
-      tracks[i].src = src;
-    }
-
-    audio.tracks  = tracks;
-    audio.ready   = true;
-    audio.loading = false;
-
-    updateMusicMix(true);
-    setMusicOn(audio.wantOn);
-
-  }).catch(function(e){
-    console.warn('Audio load failed:', e);
-    audio.failed  = true;
-    audio.loading = false;
-    audio.ready   = false;
-  });
-}
-
-function updateMusicMix(force){
-  if(!audio.ready || !audio.ctx || !audio.tracks.length) return;
-
-  const now   = audio.ctx.currentTime;
-  const combo = G.combo;
-  const tc    = force ? 0.0001 : 0.35;
-  const tcF   = force ? 0.0001 : 0.50;
-
-  for(let i = 0; i < audio.tracks.length; i++){
-    const tr        = audio.tracks[i];
-    const bandStart = COMBO_BAND * i;
-    const bandEnd   = bandStart + COMBO_BAND;
-
-    /* pads are always present, everything else waits its turn */
-    const active = (i === 0) || (combo > bandStart);
-
-    let prog = 0;
-    if(combo >= bandEnd)        prog = 1;
-    else if(combo > bandStart)  prog = (combo - bandStart) / COMBO_BAND;
-
-    let g, fq;
-    if(!active){
-      g  = 0;
-      fq = FREQ_LO;
-    } else {
-      const m = AUDIO_MAX[i];
-      g  = m * (QUIET_MUL + (1 - QUIET_MUL) * prog);
-      fq = FREQ_LO * Math.pow(FREQ_HI / FREQ_LO, prog);
-    }
-
-    tr.gain.gain.setTargetAtTime(g, now, tc);
-    tr.filt.frequency.setTargetAtTime(fq, now, tcF);
-  }
-}
-
-function setMusicOn(on){
-  audio.wantOn = on;
-  if(!audio.ready || !audio.master) return;
-  const now = audio.ctx.currentTime;
-  audio.master.gain.setTargetAtTime(on ? 0.9 : 0, now, 0.35);
-}
-
-/* ============================================================= */
 /*  GLOBE WARP (precomputed per resize)                          */
 /* ============================================================= */
 const WARP_GRID = 24;
@@ -645,17 +473,18 @@ btnEl.addEventListener('click', function(e){
   const a = primaryAction;
   hideAllButtons();
   if(a === 'start'){
-    /* begin the run — this is also the user gesture that unlocks audio */
-    initAudio();
-    setMusicOn(true);
+    /* begin the run */
     G.state = 'play';
     G.levelTime = 0;
     resetTimerCache();
+    startAudio();
   } else if(a === 'restart'){
     resetLevel();
+    startAudio();
   } else if(a === 'continue'){
     G.level++;
     buildLevel();
+    startAudio();
   }
 });
 
@@ -688,6 +517,18 @@ function turnRight(){
   player.dir = (player.dir + 1) & 3;
   player.ang = DIR_ANG[player.dir];
 }
+
+/* any gesture unlocks the audio context */
+let gestureSeen = false;
+function onGesture(){
+  gestureSeen = true;
+  if(actx && actx.state === 'suspended'){
+    try { actx.resume(); } catch(_){}
+  }
+  if(G.state === 'play') startAudio();
+}
+addEventListener('pointerdown', onGesture, true);
+addEventListener('keydown',     onGesture, true);
 
 addEventListener('keydown', function(e){
   if((e.key === 'Enter' || e.key === ' ') && primaryAction){
@@ -842,11 +683,11 @@ function buildLevel(){
   goalX = (goalCell.x + 0.5) * s;
   goalY = (goalCell.y + 0.5) * s;
 
-  /* PAR time: 15% more generous than the raw estimate */
+  /* PAR time: 15% more generous than raw estimate, times combo bonus */
   {
     const cellTime = s / G.maxSpeed;
     const basePar  = path.length * cellTime * 0.62 + 0.6;
-    G.parTime = basePar * 1.15;
+    G.parTime = basePar * 1.15 * COMBO_TIME_BONUS;
   }
 
   /* stars — only in the void outside the maze */
@@ -1057,15 +898,12 @@ function refreshCombo(pop){
     void comboEl.offsetWidth;
     comboEl.classList.add('pop');
   }
-
-  /* music follows the streak */
-  updateMusicMix(false);
 }
 
 function breakCombo(){
   const had = G.combo > 0;
   G.combo = 0;
-  refreshCombo(false);          /* -> updateMusicMix resets every stem */
+  refreshCombo(false);
   return had;
 }
 
@@ -1146,13 +984,196 @@ function goToMenu(){
   G.combo = 0;
   refreshCombo(false);
   hideAllButtons();
-  setMusicOn(false);
   buildLevel();          /* builds new maze + stars, sets state to 'play' */
   G.state = 'menu';      /* override: back to the menu */
   G.levelTime = 0;
   resetTimerCache();
   showPrimary('START', 'start');
   hideSecondary();
+}
+
+/* ============================================================= */
+/*  ============  LAYERED MUSIC (COMBO DRIVEN)  ================ */
+/*                                                               */
+/*  8 stems live next to this file (no subfolders):              */
+/*    PADS.ogg  DRUMS.ogg  KICK.ogg  BASS.ogg                    */
+/*    PERCS.ogg NOISE.ogg  LEAD.ogg  LEADS.ogg                   */
+/*                                                               */
+/*  Each stem owns a 5-combo window of the combo counter:        */
+/*    pads   0-5    drums  5-10   kick   10-15   bass  15-20     */
+/*    percs  20-25  noise  25-30  lead   30-35   leads 35-40     */
+/*                                                               */
+/*  A stem is silent until its window opens. Inside the window   */
+/*  it ramps from QUIET + heavily low-passed (muffled) up to     */
+/*  full volume and fully open. Past the window it stays clear.  */
+/*                                                               */
+/*  Every stem is started at the very same instant and loops     */
+/*  from the same playback position, so the layers always line   */
+/*  up. A slow drift corrector keeps them sample-aligned.        */
+/* ============================================================= */
+
+const TRACK_FILES = ['PADS','DRUMS','KICK','BASS','PERCS','NOISE','LEAD','LEADS'];
+
+const LAYER_BAND   = 5;        /* combos each stem takes to open    */
+const LAYER_QUIET  = 0.14;     /* gain the instant a stem joins     */
+const LAYER_LOUD   = 1.0;      /* gain once fully opened            */
+const CUT_MUFFLED  = 550;      /* Hz — "quiet + muffled" state      */
+const CUT_CLEAR    = 16000;    /* Hz — "clear and nice" state       */
+const MASTER_VOL   = 0.55;
+const SYNC_EVERY   = 2.0;      /* seconds between drift checks      */
+const SYNC_TOL     = 0.18;     /* seconds of drift we tolerate      */
+
+let actx        = null;
+let masterGain  = null;
+let layers      = [];
+let audioReady  = false;       /* nodes built, context alive      */
+let audioPlaying = false;      /* stems actually rolling          */
+let syncAcc     = 0;
+
+function ensureAudio(){
+  if(audioReady) return true;
+
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if(!AC) return false;
+
+  try {
+    actx = new AC();
+
+    masterGain = actx.createGain();
+    masterGain.gain.value = 0;
+    masterGain.connect(actx.destination);
+
+    for(let i = 0; i < TRACK_FILES.length; i++){
+      const el = new Audio();
+      el.src      = TRACK_FILES[i] + '.ogg';
+      el.loop     = true;
+      el.preload  = 'auto';
+      el.autoplay = false;
+
+      const src = actx.createMediaElementSource(el);
+
+      const filt = actx.createBiquadFilter();
+      filt.type = 'lowpass';
+      filt.frequency.value = CUT_MUFFLED;
+      filt.Q.value = 0.0001;
+
+      const g = actx.createGain();
+      g.gain.value = 0;
+
+      src.connect(filt);
+      filt.connect(g);
+      g.connect(masterGain);
+
+      layers.push({ el: el, filt: filt, g: g, tg: -1, tc: -1 });
+    }
+  } catch(err){
+    actx = null;
+    masterGain = null;
+    layers = [];
+    return false;
+  }
+
+  audioReady = true;
+  return true;
+}
+
+function startAudio(){
+  if(!ensureAudio()) return;
+
+  if(actx.state === 'suspended'){
+    try { actx.resume(); } catch(_){}
+  }
+
+  if(audioPlaying) return;
+  audioPlaying = true;
+
+  /* EVERY stem starts at position 0 at the same moment, muted or not.
+     That guarantees perfect phase alignment when one "joins in" later. */
+  for(let i = 0; i < layers.length; i++){
+    const el = layers[i].el;
+    try { el.currentTime = 0; } catch(_){}
+    const pr = el.play();
+    if(pr && pr.catch) pr.catch(function(){});
+  }
+
+  const t = actx.currentTime;
+  masterGain.gain.cancelScheduledValues(t);
+  masterGain.gain.setValueAtTime(0, t);
+  masterGain.gain.linearRampToValueAtTime(MASTER_VOL, t + 1.2);
+
+  syncAcc = 0;
+}
+
+/* keep all stems locked to the pads clock */
+function syncLayers(){
+  if(!audioPlaying) return;
+
+  let ref = null;
+  for(let i = 0; i < layers.length; i++){
+    const d = layers[i].el.duration;
+    if(d && isFinite(d) && d > 0.1){ ref = layers[i].el; break; }
+  }
+  if(!ref) return;
+
+  const rt = ref.currentTime;
+
+  for(let i = 0; i < layers.length; i++){
+    const el = layers[i].el;
+    if(el === ref) continue;
+
+    const d = el.duration;
+    if(!d || !isFinite(d) || d <= 0.1) continue;
+
+    const exp = rt % d;
+    let diff = el.currentTime - exp;
+    if(diff >  d * 0.5) diff -= d;
+    if(diff < -d * 0.5) diff += d;
+
+    if(Math.abs(diff) > SYNC_TOL){
+      try { el.currentTime = exp; } catch(_){}
+    }
+  }
+}
+
+function updateAudio(dt){
+  if(!audioPlaying || !actx) return;
+
+  const now   = actx.currentTime;
+  const combo = G.combo;
+
+  for(let i = 0; i < layers.length; i++){
+    const L = layers[i];
+
+    const bandStart = i * LAYER_BAND;
+
+    let targetGain = 0;
+    let targetCut  = CUT_MUFFLED;
+
+    if(combo >= bandStart){
+      let p = (combo - bandStart) / LAYER_BAND;
+      if(p > 1) p = 1;
+
+      targetGain = LAYER_QUIET + (LAYER_LOUD - LAYER_QUIET) * p;
+      /* perceptual (logarithmic) sweep from muffled to wide open */
+      targetCut  = CUT_MUFFLED * Math.pow(CUT_CLEAR / CUT_MUFFLED, p);
+    }
+
+    if(targetGain !== L.tg){
+      L.tg = targetGain;
+      L.g.gain.setTargetAtTime(targetGain, now, 0.35);
+    }
+
+    if(targetCut !== L.tc){
+      L.tc = targetCut;
+      L.filt.frequency.setTargetAtTime(targetCut, now, 0.35);
+    }
+  }
+
+  syncAcc += dt;
+  if(syncAcc >= SYNC_EVERY){
+    syncAcc = 0;
+    syncLayers();
+  }
 }
 
 /* ============================================================= */
@@ -1243,12 +1264,14 @@ function update(dt){
       player.x += dx / steps;
       player.y += dy / steps;
 
-      if(distToGoalWall() < player.r + 5){ win(); return; }
+      if(distToGoalWall() < player.r + 5){ win(); break; }
 
-      if(hitsWall(player.x, player.y)){ crash(); return; }
+      if(hitsWall(player.x, player.y)){ crash(); break; }
     }
+  }
 
-    /* trail */
+  /* trail */
+  if(G.state === 'play' && trail.length){
     const lastT = trail[trail.length - 1];
     const tdx = player.x - lastT.x;
     const tdy = player.y - lastT.y;
@@ -1256,7 +1279,6 @@ function update(dt){
       trail.push({ x: player.x, y: player.y });
       if(trail.length > 3000) trail.shift();
     }
-
     updateNavigator();
   }
 
@@ -1268,6 +1290,9 @@ function update(dt){
     cam.x += (camTargetX - cam.x) * ck;
     cam.y += (camTargetY - cam.y) * ck;
   }
+
+  /* music follows the combo */
+  updateAudio(dt);
 }
 
 /* ============================================================= */
