@@ -178,7 +178,7 @@
 <div id="timer">
   <span id="tCur">00:000</span>
   <span class="par" id="tPar">/ 00:000</span>
-  <span class="tminus" id="tMinus">T-00:000</span>
+  <span class="tminus" id="tMin">T-00:000</span>
 </div>
 <div id="tbar"><div id="tbarFill"></div></div>
 <div id="msg"></div>
@@ -198,7 +198,7 @@ const comboEl = document.getElementById('combo');
 const timerEl = document.getElementById('timer');
 const tCurEl  = document.getElementById('tCur');
 const tParEl  = document.getElementById('tPar');
-const tMinEl  = document.getElementById('tMinus');
+const tMinEl  = document.getElementById('tMin');
 const tbarEl  = document.getElementById('tbar');
 const tbarFil = document.getElementById('tbarFill');
 const msgEl   = document.getElementById('msg');
@@ -241,6 +241,9 @@ function applyTheme(){
 
   const b = hudEl.querySelector('b');
   if(b) b.style.color = accent;
+
+  /* vignette glow uses the accent hue → mark for rebuild */
+  vignetteHue = -1;
 }
 
 function pickColors(){
@@ -316,6 +319,56 @@ function warpBlit(){
 }
 
 /* ============================================================= */
+/*  VIGNETTE  —  dark by default, brightens with the music       */
+/* ============================================================= */
+let vignetteDark = null;
+let vignetteGlow = null;
+let vignetteHue  = -1;
+
+function buildVignettes(){
+  /* ---- dark base vignette (always on, subtle) ---- */
+  vignetteDark = document.createElement('canvas');
+  vignetteDark.width  = CW;
+  vignetteDark.height = CH;
+  {
+    const c = vignetteDark.getContext('2d');
+    const inner = Math.min(CW, CH) * 0.38;
+    const outer = Math.max(CW, CH) * 0.74;
+    const g = c.createRadialGradient(CW/2, CH/2, inner, CW/2, CH/2, outer);
+    g.addColorStop(0,    'rgba(0,0,0,0)');
+    g.addColorStop(0.55, 'rgba(0,0,0,0.22)');
+    g.addColorStop(1,    'rgba(0,0,0,0.82)');
+    c.fillStyle = g;
+    c.fillRect(0, 0, CW, CH);
+  }
+
+  /* ---- accent glow vignette (music-reactive, drawn additive) ---- */
+  vignetteGlow = document.createElement('canvas');
+  vignetteGlow.width  = CW;
+  vignetteGlow.height = CH;
+  rebuildGlowVignette();
+}
+
+function rebuildGlowVignette(){
+  if(!vignetteGlow) return;
+  const c = vignetteGlow.getContext('2d');
+  c.clearRect(0, 0, CW, CH);
+
+  const inner = Math.min(CW, CH) * 0.28;
+  const outer = Math.max(CW, CH) * 0.72;
+  const g = c.createRadialGradient(CW/2, CH/2, inner, CW/2, CH/2, outer);
+
+  g.addColorStop(0,    'hsla(' + hue + ',95%,60%,0)');
+  g.addColorStop(0.55, 'hsla(' + hue + ',95%,60%,0.10)');
+  g.addColorStop(0.82, 'hsla(' + hue + ',95%,62%,0.42)');
+  g.addColorStop(1,    'hsla(' + hue + ',95%,66%,0.85)');
+
+  c.fillStyle = g;
+  c.fillRect(0, 0, CW, CH);
+  vignetteHue = hue;
+}
+
+/* ============================================================= */
 /*  RESIZE                                                       */
 /* ============================================================= */
 function resize(){
@@ -324,6 +377,7 @@ function resize(){
   off.width  = CW;
   off.height = CH;
   buildWarpTable();
+  buildVignettes();
 }
 addEventListener('resize', resize);
 
@@ -377,7 +431,8 @@ let navCell        = { x:-1, y:-1 };
 const cam = { x:0, y:0 };
 
 /* ============================================================= */
-/*  STARFIELD  —  only outside the maze bounding box             */
+/*  STARFIELD  —  fills the whole level (void + outer margin)    */
+/*  so there are always stars on screen while running the path   */
 /* ============================================================= */
 let stars = [];
 
@@ -387,8 +442,9 @@ function generateStars(){
   const mazeW = W * s;
   const mazeH = H * s;
 
-  /* how far the starfield extends past the maze on all sides */
-  const MARGIN = Math.max(2800, mazeW * 0.55);
+  /* starfield extends well past the maze on all sides so the
+     camera never reaches its edge */
+  const MARGIN = Math.max(2200, Math.max(mazeW, mazeH) * 0.30);
 
   const minX = -MARGIN;
   const maxX = mazeW + MARGIN;
@@ -396,12 +452,14 @@ function generateStars(){
   const maxY = mazeH + MARGIN;
 
   const totalArea = (maxX - minX) * (maxY - minY);
-  const mazeArea  = mazeW * mazeH;
-  const voidArea  = Math.max(1, totalArea - mazeArea);
 
-  /* noticeably more stars per unit area than before */
-  const density = 1 / 11000;
-  const targetCount = Math.min(9000, Math.floor(voidArea * density));
+  /* much higher density than before, and it now covers the maze
+     interior too (only the corridor cells themselves are kept
+     clear), so stars surround the entire path */
+  const density     = 1 / 5500;
+  const targetCount = Math.min(18000, Math.floor(totalArea * density));
+
+  const PADF = 0.16;   /* clearance kept next to corridor walls */
 
   let attempts = 0;
   const maxAttempts = targetCount * 8;
@@ -411,8 +469,23 @@ function generateStars(){
     const x = minX + Math.random() * (maxX - minX);
     const y = minY + Math.random() * (maxY - minY);
 
-    /* reject anything inside the maze footprint */
-    if(x >= 0 && x <= mazeW && y >= 0 && y <= mazeH) continue;
+    /* ---- keep the running corridor clear ---- */
+    const cx = Math.floor(x / s);
+    const cy = Math.floor(y / s);
+
+    if(cx >= 0 && cx < W && cy >= 0 && cy < H){
+      const fx = x / s - cx;
+      const fy = y / s - cy;
+
+      let blocked = pathIdxMap.has(cy * W + cx);
+
+      if(!blocked && fx < PADF        && cx > 0     && pathIdxMap.has(cy * W + (cx - 1))) blocked = true;
+      if(!blocked && fx > 1 - PADF    && cx < W - 1 && pathIdxMap.has(cy * W + (cx + 1))) blocked = true;
+      if(!blocked && fy < PADF        && cy > 0     && pathIdxMap.has((cy - 1) * W + cx)) blocked = true;
+      if(!blocked && fy > 1 - PADF    && cy < H - 1 && pathIdxMap.has((cy + 1) * W + cx)) blocked = true;
+
+      if(blocked) continue;
+    }
 
     const size  = 0.6 + Math.random() * 2.0;
     const alpha = 0.25 + Math.random() * 0.65;
@@ -421,7 +494,7 @@ function generateStars(){
 }
 
 /* ============================================================= */
-/*  BOOST + ACCELERATION RAMP                                    */
+/*  BOOST + ACCELERATION RAMP + CHROMATIC ABERRATION             */
 /* ============================================================= */
 const BOOST_MULT_BASE    = 1.8;
 const BOOST_HOLD_REFRESH = 0.30;
@@ -433,6 +506,10 @@ let boostPrev  = false;
 let boostGlow  = 0;
 let boostRamp  = 0;
 let shockwaves = [];
+
+/* chromatic aberration state (pixels) */
+let chroma     = 0;    /* smoothed split amount                     */
+let chromaKick = 0;    /* impulse added by collisions               */
 
 function currentBoostMult(){
   return BOOST_MULT_BASE + boostRamp;
@@ -477,13 +554,18 @@ const STEM_SPAN    = 5;      /* combos it takes for a stem to bloom   */
 const MASTER_GAIN  = 0.5;
 
 const audio = {
-  ctx:     null,
-  master:  null,
-  buffers: null,
-  nodes:   null,
-  started: false,
-  ready:   false
+  ctx:      null,
+  master:   null,
+  analyser: null,
+  data:     null,
+  buffers:  null,
+  nodes:    null,
+  started:  false,
+  ready:    false
 };
+
+/* smoothed music intensity 0..1 — drives the vignette glow */
+let musicLevel = 0;
 
 function initAudio(){
   if(audio.ctx) return;
@@ -495,6 +577,13 @@ function initAudio(){
   audio.master = audio.ctx.createGain();
   audio.master.gain.value = MASTER_GAIN;
   audio.master.connect(audio.ctx.destination);
+
+  /* analyser tap on the master bus for the music-reactive vignette */
+  audio.analyser = audio.ctx.createAnalyser();
+  audio.analyser.fftSize = 256;
+  audio.analyser.smoothingTimeConstant = 0.7;
+  audio.master.connect(audio.analyser);
+  audio.data = new Uint8Array(audio.analyser.fftSize);
 
   audio.nodes = new Array(LAYERS.length);
 
@@ -600,6 +689,28 @@ function updateAudio(combo){
     node.gain.gain.setTargetAtTime(targetGain, t, FADE_TAU);
     node.filter.frequency.setTargetAtTime(targetFreq, t, FADE_TAU);
   }
+}
+
+/* read the master analyser and smooth the level for the vignette */
+function updateMusicLevel(dt){
+  let target = 0;
+
+  if(audio.analyser && audio.started && audio.data){
+    audio.analyser.getByteTimeDomainData(audio.data);
+    let sum = 0;
+    const n = audio.data.length;
+    for(let i = 0; i < n; i++){
+      const v = (audio.data[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / n);
+    /* boost into a usable 0..1 range — typical music RMS ~0.05..0.20 */
+    target = Math.min(1, rms * 5.5);
+  }
+
+  const k = 1 - Math.exp(-9 * dt);
+  musicLevel += (target - musicLevel) * k;
+  if(musicLevel < 0.001) musicLevel = 0;
 }
 
 /* ============================================================= */
@@ -802,8 +913,9 @@ function buildLevel(){
 
   const level = G.level;
 
-  /* level length grows at half the original rate */
-  const targetLen = Math.round(12 + (level - 1) * 2.5);
+  /* level length grows at a much gentler rate now:
+     +1 corridor cell per level instead of +2.5 */
+  const targetLen = Math.round(12 + (level - 1) * 1.0);
   const N = Math.max(10, Math.ceil(Math.sqrt(targetLen) * 3.5)) + 4;
 
   W = N; H = N;
@@ -841,7 +953,7 @@ function buildLevel(){
     G.parTime = basePar * 1.15 * 1.3;
   }
 
-  /* stars — only in the void outside the maze */
+  /* stars — scattered across the whole level, around the full path */
   generateStars();
 
   /* walls: 4 sides of each path cell minus openings */
@@ -911,6 +1023,9 @@ function buildLevel(){
   boostGlow = 0;
   boostRamp = 0;
   G.boosting = false;
+
+  chroma = 0;
+  chromaKick = 0;
 
   keys.clear(); pointers.clear();
 
@@ -1073,6 +1188,7 @@ function crash(){
   G.state = 'dead';
   G.boosting = false;
   G.shake = 10;
+  chromaKick = 16;          /* hard chromatic punch on impact */
   showMsg('CRASH');
   showPrimary('RESTART', 'restart');
   showSecondary('MAIN MENU', 'menu');
@@ -1122,6 +1238,9 @@ function resetLevel(){
   boostGlow = 0;
   boostRamp = 0;
   G.boosting = false;
+
+  chroma = 0;
+  chromaKick = 0;
 
   G.levelTime   = 0;
   G.state       = 'play';
@@ -1208,6 +1327,34 @@ function update(dt){
     if(shockwaves[i].t >= shockwaves[i].dur) shockwaves.splice(i, 1);
   }
 
+  /* ----------------------------------------------------------- */
+  /*  CHROMATIC ABERRATION                                       */
+  /*  • ramps up while boosting, scaled by current speed         */
+  /*  • spikes on collision, then decays                         */
+  /* ----------------------------------------------------------- */
+  {
+    const speedNow = G.maxSpeed * (boosting ? currentBoostMult() : 1);
+    const speedN   = speedNow / 500;              /* ~0.4 .. 2.0 */
+
+    let target = 0;
+    if(boosting){
+      const rampT = Math.min(1, boostRamp / BOOST_RAMP_MAX);
+      target = (1.0 + rampT * 3.2) * Math.max(0.45, speedN);
+    }
+    target += chromaKick;
+
+    const k = 1 - Math.exp(-(target > chroma ? 18 : 9) * dt);
+    chroma += (target - chroma) * k;
+
+    if(chroma < 0.02) chroma = 0;
+    else if(chroma > 18) chroma = 18;
+
+    chromaKick = Math.max(0, chromaKick - dt * 32);
+  }
+
+  /* music intensity for the vignette */
+  updateMusicLevel(dt);
+
   /* movement */
   if(G.state === 'play'){
     G.levelTime += dt;
@@ -1264,6 +1411,20 @@ function update(dt){
 /* ============================================================= */
 /*  RENDER                                                       */
 /* ============================================================= */
+function drawShipPath(r, x, y, ang){
+  r.save();
+  r.translate(x, y);
+  r.rotate(ang);
+  r.beginPath();
+  r.moveTo( 5.0,  0);
+  r.lineTo(-3.4, -3.2);
+  r.lineTo(-1.6,  0);
+  r.lineTo(-3.4,  3.2);
+  r.closePath();
+  r.fill();
+  r.restore();
+}
+
 function render(){
   const r = octx;
 
@@ -1284,6 +1445,11 @@ function render(){
 
   r.lineCap  = 'round';
   r.lineJoin = 'round';
+
+  /* ---- chromatic aberration offsets (screen space, along travel) ---- */
+  const chrOn = chroma > 0.05;
+  const cdx   = chrOn ? DIR_VEC[player.dir][0] * chroma : 0;
+  const cdy   = chrOn ? DIR_VEC[player.dir][1] * chroma : 0;
 
   /* ---------------- stars ---------------- */
   {
@@ -1335,6 +1501,17 @@ function render(){
     r.lineWidth = wallGlowW;
     r.stroke(wp);
 
+    /* chromatic fringes on the wall core */
+    if(chrOn){
+      r.globalCompositeOperation = 'lighter';
+      r.lineWidth = wallCoreW;
+      r.strokeStyle = 'rgba(255,40,70,0.95)';
+      r.save(); r.translate(-cdx, -cdy); r.stroke(wp); r.restore();
+      r.strokeStyle = 'rgba(60,150,255,0.95)';
+      r.save(); r.translate( cdx,  cdy); r.stroke(wp); r.restore();
+      r.globalCompositeOperation = 'source-over';
+    }
+
     r.strokeStyle = wallColor;
     r.lineWidth = wallCoreW;
     r.stroke(wp);
@@ -1343,35 +1520,58 @@ function render(){
   /* ---------------- finish wall ---------------- */
   if(goalWall){
     const pulse = 0.55 + 0.45 * Math.sin(G.levelTime * 4);
+
+    const gw = new Path2D();
+    gw.moveTo(goalWall[0] - camX, goalWall[1] - camY);
+    gw.lineTo(goalWall[2] - camX, goalWall[3] - camY);
+
     r.save();
+    r.lineCap   = 'round';
+    r.lineWidth = Math.max(2.5, s * 0.02);
+
+    if(chrOn){
+      r.globalCompositeOperation = 'lighter';
+      r.shadowBlur = 0;
+      r.strokeStyle = 'rgba(255,40,70,0.9)';
+      r.save(); r.translate(-cdx, -cdy); r.stroke(gw); r.restore();
+      r.strokeStyle = 'rgba(60,150,255,0.9)';
+      r.save(); r.translate( cdx,  cdy); r.stroke(gw); r.restore();
+      r.globalCompositeOperation = 'source-over';
+    }
+
     r.shadowColor = accent;
     r.shadowBlur  = 18 + pulse * 16;
     r.strokeStyle = '#ffffff';
-    r.lineWidth   = Math.max(2.5, s * 0.02);
-    r.lineCap     = 'round';
-    r.beginPath();
-    r.moveTo(goalWall[0] - camX, goalWall[1] - camY);
-    r.lineTo(goalWall[2] - camX, goalWall[3] - camY);
-    r.stroke();
+    r.stroke(gw);
 
     r.shadowBlur  = 34 + pulse * 22;
     r.globalAlpha = 0.55;
-    r.beginPath();
-    r.moveTo(goalWall[0] - camX, goalWall[1] - camY);
-    r.lineTo(goalWall[2] - camX, goalWall[3] - camY);
-    r.stroke();
+    r.stroke(gw);
     r.restore();
     r.globalAlpha = 1;
   }
 
   /* ---------------- trail ---------------- */
   if(trail.length > 1){
-    r.beginPath();
-    r.moveTo(trail[0].x - camX, trail[0].y - camY);
+    const tp = new Path2D();
+    tp.moveTo(trail[0].x - camX, trail[0].y - camY);
     for(let i = 1; i < trail.length; i++){
-      r.lineTo(trail[i].x - camX, trail[i].y - camY);
+      tp.lineTo(trail[i].x - camX, trail[i].y - camY);
     }
-    r.lineTo(player.x - camX, player.y - camY);
+    tp.lineTo(player.x - camX, player.y - camY);
+
+    r.lineCap  = 'round';
+    r.lineJoin = 'round';
+
+    if(chrOn){
+      r.globalCompositeOperation = 'lighter';
+      r.lineWidth = 1.8;
+      r.strokeStyle = 'rgba(255,40,70,0.85)';
+      r.save(); r.translate(-cdx, -cdy); r.stroke(tp); r.restore();
+      r.strokeStyle = 'rgba(60,150,255,0.85)';
+      r.save(); r.translate( cdx,  cdy); r.stroke(tp); r.restore();
+      r.globalCompositeOperation = 'source-over';
+    }
 
     if(G.boosting){
       const t = Math.min(1, boostRamp / BOOST_RAMP_MAX);
@@ -1381,9 +1581,7 @@ function render(){
       r.lineWidth   = 1.4;
       r.strokeStyle = 'rgba(255,255,255,0.85)';
     }
-    r.lineCap     = 'round';
-    r.lineJoin    = 'round';
-    r.stroke();
+    r.stroke(tp);
   }
 
   /* ---------------- shockwaves ---------------- */
@@ -1421,8 +1619,16 @@ function render(){
   const py = player.y - camY;
 
   r.save();
-  r.translate(px, py);
-  r.rotate(visAng);
+
+  if(chrOn){
+    r.globalCompositeOperation = 'lighter';
+    r.shadowBlur = 0;
+    r.fillStyle = 'rgba(255,40,70,0.95)';
+    drawShipPath(r, px - cdx, py - cdy, visAng);
+    r.fillStyle = 'rgba(60,150,255,0.95)';
+    drawShipPath(r, px + cdx, py + cdy, visAng);
+    r.globalCompositeOperation = 'source-over';
+  }
 
   if(boostGlow > 0.03){
     r.shadowColor = accent;
@@ -1432,20 +1638,37 @@ function render(){
     r.shadowBlur  = 8;
   }
   r.fillStyle = '#ffffff';
-
-  r.beginPath();
-  r.moveTo( 5.0,  0);
-  r.lineTo(-3.4, -3.2);
-  r.lineTo(-1.6,  0);
-  r.lineTo(-3.4,  3.2);
-  r.closePath();
-  r.fill();
+  drawShipPath(r, px, py, visAng);
   r.restore();
 
   /* warp to display canvas */
   ctx.fillStyle = bgBase;
   ctx.fillRect(0, 0, CW, CH);
   warpBlit();
+
+  /* ---------------- vignette (screen space) ---------------- */
+  {
+    /* rebuild the accent glow if the palette changed */
+    if(vignetteHue !== hue) rebuildGlowVignette();
+
+    /* dim base vignette — always present, keeps edges dark */
+    if(vignetteDark){
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(vignetteDark, 0, 0);
+    }
+
+    /* music-reactive accent glow — brightens the edges with volume */
+    if(vignetteGlow && musicLevel > 0.01){
+      /* slight curve so quiet passages stay subtle and loud hits pop */
+      const glowA = Math.min(1, Math.pow(musicLevel, 0.85) * 1.15);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = glowA;
+      ctx.drawImage(vignetteGlow, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  }
 
   /* navigator (UI) */
   renderNavigator();
